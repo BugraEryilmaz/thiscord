@@ -15,6 +15,10 @@ pub const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_AVATAR_BASE64: usize = MAX_AVATAR_BYTES.div_ceil(3) * 4;
 pub const AVATAR_SIZE: u32 = 256;
 pub const GOOGLE_CALLBACK_PATH: &str = "/api/v1/account/google/callback";
+/// Query parameter that carries the one-time Google completion secret from the
+/// backend callback to the desktop loopback listener. Never a session or provider
+/// token, and useless without the attempt's ticket (docs/accounts.md).
+pub const GOOGLE_COMPLETION_PARAM: &str = "completion";
 pub const EMAIL_VERIFICATION_PATH: &str = "/api/v1/account/verify-email";
 pub const PASSWORD_RESET_PATH: &str = "/api/v1/account/reset-password";
 /// Custom status text bound, in Unicode scalar values.
@@ -131,6 +135,12 @@ pub enum AccountRequest {
     },
     GoogleComplete {
         ticket: String,
+        /// The completion secret the desktop loopback received. Required for
+        /// attempts started with a `callback`; absent for browser attempts (bound
+        /// by cookie) and from clients released before it existed, which are
+        /// told to update instead of failing to parse.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<String>,
     },
     GoogleCancel {
         ticket: String,
@@ -326,6 +336,37 @@ pub enum AccountResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_completion_is_optional_and_omitted_when_absent() {
+        // Desktop 0.1.63 and the browser client send only the ticket.
+        let old = serde_json::json!({"action":"google_complete","ticket":"t"});
+        let Ok(AccountRequest::GoogleComplete { ticket, completion }) =
+            serde_json::from_value::<AccountRequest>(old.clone())
+        else {
+            panic!("old payload must deserialize")
+        };
+        assert_eq!((ticket.as_str(), completion), ("t", None));
+        let request = AccountRequest::GoogleComplete {
+            ticket: "t".into(),
+            completion: None,
+        };
+        assert_eq!(serde_json::to_value(&request).unwrap(), old);
+        let bound = serde_json::json!({"action":"google_complete","ticket":"t","completion":"c"});
+        let Ok(AccountRequest::GoogleComplete { completion, .. }) =
+            serde_json::from_value::<AccountRequest>(bound)
+        else {
+            panic!("bound payload must deserialize")
+        };
+        assert_eq!(completion.as_deref(), Some("c"));
+        // Unknown fields stay rejected.
+        assert!(
+            serde_json::from_value::<AccountRequest>(
+                serde_json::json!({"action":"google_complete","ticket":"t","secret":"c"})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn activities_are_bounded_single_line_and_stable_on_the_wire() {

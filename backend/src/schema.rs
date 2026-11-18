@@ -488,6 +488,10 @@ diesel::table! {
         callback -> Nullable<Text>,
         status -> Text,
         expires_at -> Timestamptz,
+        browser_hash -> Nullable<Text>,
+        completion_hash -> Nullable<Text>,
+        subject -> Nullable<Text>,
+        email -> Nullable<Text>,
     }
 }
 

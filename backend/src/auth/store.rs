@@ -634,7 +634,9 @@ pub(super) fn dispatch(
         AccountRequest::ResetPassword { code, password } => {
             consume_code(&mut c, &code, Some(password_hash(&password)?))
         }
-        AccountRequest::GoogleComplete { ticket } => super::google::complete(&mut c, &ticket),
+        AccountRequest::GoogleComplete { ticket, completion } => {
+            super::google::complete(&mut c, &ticket, completion.as_deref())
+        }
         AccountRequest::GoogleCancel { ticket } => {
             execute(
                 &mut c,

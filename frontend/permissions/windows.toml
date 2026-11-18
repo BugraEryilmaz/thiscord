@@ -23,6 +23,7 @@ commands.allow = [
   "prepare_google",
   "open_google",
   "cancel_google",
+  "google_callback",
   "open_external_url",
   "audio_devices",
   "voice_message_record_start",

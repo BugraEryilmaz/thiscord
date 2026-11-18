@@ -1290,10 +1290,12 @@ async fn oauth_cancellation_expiry_and_callback_replay() {
     let app = api::router(Some(db.pool.clone()), vec![]);
     let state = "local-test-state";
     let ticket = URL_SAFE_NO_PAD.encode([7u8; 32]);
+    // The browser attempt's cookie secret, as `google_start` would have set it.
+    let browser = URL_SAFE_NO_PAD.encode([9u8; 32]);
     let digest = |s: &str| URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()));
     let insert = || {
-        diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device) VALUES($1,$2,'test-verifier','test-nonce','login','test')")
-        .bind::<Text,_>(digest(state)).bind::<Text,_>(digest(&ticket)).execute(&mut db.pool.get().unwrap()).unwrap()
+        diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device,browser_hash) VALUES($1,$2,'test-verifier','test-nonce','login','test',$3)")
+        .bind::<Text,_>(digest(state)).bind::<Text,_>(digest(&ticket)).bind::<Text,_>(digest(&browser)).execute(&mut db.pool.get().unwrap()).unwrap()
     };
     insert();
     call(
@@ -1308,13 +1310,19 @@ async fn oauth_cancellation_expiry_and_callback_replay() {
             .uri(format!(
                 "{GOOGLE_CALLBACK_PATH}?state={state}&error=access_denied"
             ))
+            .header(
+                "cookie",
+                format!("__Host-thiscord_google={browser}; __Host-thiscord_session=x"),
+            )
             .body(Body::empty())
             .unwrap()
     };
-    assert_eq!(
-        app.clone().oneshot(callback()).await.unwrap().status(),
-        StatusCode::OK
-    );
+    let response = app.clone().oneshot(callback()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // The consumed attempt cookie is cleared; the session cookie is untouched.
+    let cleared = response.headers()["set-cookie"].to_str().unwrap();
+    assert!(cleared.starts_with("__Host-thiscord_google=; Max-Age=0;"));
+    assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(
         app.clone().oneshot(callback()).await.unwrap().status(),
         StatusCode::UNAUTHORIZED
@@ -1352,6 +1360,93 @@ async fn oauth_cancellation_expiry_and_callback_replay() {
     call(
         &app,
         json!({"action":"google_complete","ticket":ticket}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn google_attempts_refuse_other_browsers_and_ticket_only_desktop_completion() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let digest = |s: &str| URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()));
+    let random = || URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes().repeat(2));
+    // Browser attempts: a callback from a browser without the attempt's cookie (the
+    // victim of a forwarded Google link), or with another attempt's cookie, is
+    // refused with a clear page and fails the attempt; nothing reaches Google.
+    for cookie in [None, Some(format!("__Host-thiscord_google={}", random()))] {
+        let (state, ticket) = (random(), random());
+        diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device,browser_hash) VALUES($1,$2,'v','n','login','test',$3)")
+            .bind::<Text,_>(digest(&state)).bind::<Text,_>(digest(&ticket)).bind::<Text,_>(digest(&random()))
+            .execute(&mut db.pool.get().unwrap()).unwrap();
+        let mut request =
+            Request::builder().uri(format!("{GOOGLE_CALLBACK_PATH}?state={state}&code=c"));
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.headers().get("set-cookie").is_none());
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("not started in this browser"));
+        let body = call(
+            &app,
+            json!({"action":"google_complete","ticket":ticket}),
+            None,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Google sign-in failed")
+        );
+    }
+
+    // Desktop attempt made ready by its callback: the released 0.1.63 payload
+    // (ticket only) parses, is told to update, and does not consume the attempt.
+    let (ticket, completion) = (random(), random());
+    diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device,callback,status,subject,email,completion_hash) VALUES($1,$2,'','','login','test','http://127.0.0.1:54321/thiscord/x','ready','google-desktop','google-desktop@example.com',$3)")
+        .bind::<Text,_>(digest(&random())).bind::<Text,_>(digest(&ticket)).bind::<Text,_>(digest(&completion))
+        .execute(&mut db.pool.get().unwrap()).unwrap();
+    let body = call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket}),
+        None,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["code"], "validation_failed");
+    assert_eq!(body["message"], "Update Thiscord to sign in with Google");
+    call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket,"completion":random()}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    let session = call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket,"completion":completion}),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(session["result"], "session");
+    call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket,"completion":completion}),
         None,
         StatusCode::UNAUTHORIZED,
     )

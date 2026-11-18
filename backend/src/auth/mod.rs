@@ -252,6 +252,8 @@ async fn handle(
         command,
         Some(AccountRequest::Current | AccountRequest::Sessions | AccountRequest::Rotate)
     );
+    // A browser Google attempt's binding secret, delivered only as a cookie.
+    let mut google_attempt = None;
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid account request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
@@ -292,7 +294,12 @@ async fn handle(
                 purpose,
                 callback,
                 device,
-            } => google::start(pool, token, purpose, callback, device, permit).await,
+            } => google::start(pool, token, purpose, callback, device, permit)
+                .await
+                .map(|(response, browser)| {
+                    google_attempt = browser;
+                    response
+                }),
             command => tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 store::dispatch(&pool, &token, command)
@@ -319,6 +326,11 @@ async fn handle(
     };
     if let Some(value) = set_cookie.or_else(|| clear.then(cookie::clear)) {
         response.headers_mut().insert("set-cookie", value);
+    }
+    if let Some(secret) = google_attempt {
+        response
+            .headers_mut()
+            .append("set-cookie", cookie::issue_google_attempt(&secret));
     }
     response
         .headers_mut()
