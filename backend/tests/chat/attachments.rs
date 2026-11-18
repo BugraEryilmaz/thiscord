@@ -782,3 +782,78 @@ async fn published_attachments_are_capped_per_account_per_guild() {
         cap
     );
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn uploads_wait_for_the_channel_before_taking_the_account_quota_lock() {
+    #[derive(QueryableByName)]
+    struct Flag {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        flag: bool,
+    }
+    #[derive(QueryableByName)]
+    struct Pid {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        pid: i32,
+    }
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, _, _, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let lock = format!(
+        "attachment:{}",
+        diesel::sql_query("SELECT id::text AS data FROM accounts WHERE username='owner'")
+            .get_result::<JsonText>(&mut db.pool.get().unwrap())
+            .unwrap()
+            .data
+    );
+    // A send holds its channel FOR UPDATE and then takes the account lock in
+    // `attach`; an upload must not hold that account lock while it waits here.
+    let mut sender = db.pool.get().unwrap();
+    sender.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT id FROM channels WHERE id=$1::uuid FOR UPDATE")
+        .bind::<Text, _>(channel.as_str().unwrap())
+        .execute(&mut sender)
+        .unwrap();
+    let sender_pid = diesel::sql_query("SELECT pg_backend_pid() AS pid")
+        .get_result::<Pid>(&mut sender)
+        .unwrap()
+        .pid;
+    let uri = upload_url(&guild, &channel, "file.bin", "text/plain");
+    let upload = {
+        let (app, owner) = (app.clone(), owner.clone());
+        tokio::spawn(async move {
+            upload_body(&app, &owner, &uri, Body::from("x"), StatusCode::OK).await
+        })
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1::integer=ANY(pg_blocking_pids(pid))) AS flag")
+        .bind::<diesel::sql_types::Integer, _>(sender_pid)
+        .get_result::<Flag>(&mut db.pool.get().unwrap())
+        .unwrap()
+        .flag
+    {
+        assert!(std::time::Instant::now() < deadline, "upload never waited for the channel");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut probe = db.pool.get().unwrap();
+    let free = probe
+        .transaction::<_, diesel::result::Error, _>(|c| {
+            diesel::sql_query("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS flag")
+                .bind::<Text, _>(&lock)
+                .get_result::<Flag>(c)
+                .map(|f| f.flag)
+        })
+        .unwrap();
+    sender.batch_execute("COMMIT").unwrap();
+    assert!(
+        free,
+        "upload held the account lock while waiting for the channel"
+    );
+    upload.await.unwrap();
+}
+#[derive(QueryableByName)]
+struct JsonText {
+    #[diesel(sql_type = Text)]
+    data: String,
+}
