@@ -1484,6 +1484,10 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--tint-15);
 .spoiler:not(.spoiler-revealed) .spoiler-content * { visibility: hidden; }
 .spoiler.spoiler-revealed { background: var(--tint-8); color: inherit; cursor: text; }
 .spoiler-cover { position: relative; width: fit-content; max-width: 100%; overflow: hidden; border-radius: var(--radius-lg); }
+/* Chat cards keep their full width (max-w-sm) under a cover: shrinking to fit
+   collapses the reserved image box until the image decodes, which resizes a
+   visible row and jumps the virtualized list (docs/chat.md). */
+.spoiler-cover.spoiler-cover-card { width: 100%; max-width: 24rem; }
 .spoiler-cover-content { transition: filter .25s ease; }
 .spoiler-cover:not(.spoiler-cover-revealed) .spoiler-cover-content { filter: blur(28px) saturate(.7); pointer-events: none; user-select: none; }
 .spoiler-cover-button { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--color-rail) 35%, transparent); cursor: pointer; }

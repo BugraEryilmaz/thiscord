@@ -272,6 +272,130 @@ async fn attachments_bind_owner_channel_replay_and_delete_atomically() {
     assert_eq!(count, 0);
 }
 
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn image_sizes_reach_messages_on_upload_and_by_backfill() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, _, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let png = |width, height| {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(width, height)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        Body::from(out.into_inner())
+    };
+    let uri = |name: &str, mime: &str| upload_url(&guild, &channel, name, mime);
+    // The header decides, not the client's hint.
+    let wide = upload_body(
+        &app,
+        &owner,
+        &uri("wide.bin", "text/plain"),
+        png(160, 90),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(wide["image"], json!({"width":160,"height":90}));
+    let file = upload_body(
+        &app,
+        &owner,
+        &uri("notes.png", "image/png"),
+        Body::from("plain"),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(file.get("image").is_none(), "{file}");
+    let sent = chat(
+        &app,
+        &owner,
+        send(&guild, &channel, json!([wide["id"], file["id"]])),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(sent["message"]["attachments"], json!([wide, file]));
+
+    // Files stored before sizes were recorded: no size on the row or message.
+    let old = upload_body(
+        &app,
+        &owner,
+        &uri("old.png", "image/png"),
+        png(30, 40),
+        StatusCode::OK,
+    )
+    .await;
+    let old_message = chat(
+        &app,
+        &owner,
+        send(&guild, &channel, json!([old["id"]])),
+        StatusCode::OK,
+    )
+    .await["message"]
+        .clone();
+    db.pool
+        .get()
+        .unwrap()
+        .batch_execute(&format!(
+            "UPDATE attachments SET image_width=NULL,image_height=NULL; UPDATE messages SET attachments=(SELECT jsonb_agg(e - 'image') FROM jsonb_array_elements(attachments) e) WHERE id='{}'",
+            old_message["id"].as_str().unwrap()
+        ))
+        .unwrap();
+    let history = || {
+        chat(
+            &app,
+            &guest,
+            json!({"action":"history","guild_id":guild,"channel_id":channel}),
+            StatusCode::OK,
+        )
+    };
+    let before = history().await;
+    let stored = |history: &Value| {
+        history["history"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == old_message["id"])
+            .unwrap()
+            .clone()
+    };
+    assert!(stored(&before)["attachments"][0].get("image").is_none());
+
+    thiscord_backend::chat::start_image_size_backfill(db.pool.clone());
+    for _ in 0..100 {
+        if crate_count(
+            &db,
+            "SELECT count(*)::bigint AS count FROM attachments WHERE image_width IS NULL",
+        ) == 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let after = stored(&history().await);
+    assert_eq!(
+        after["attachments"][0]["image"],
+        json!({"width":30,"height":40})
+    );
+    // Metadata only: the message is otherwise unchanged and keeps its revision.
+    let mut expected = old_message.clone();
+    expected["attachments"][0]["image"] = json!({"width":30,"height":40});
+    assert_eq!(after, expected);
+    assert_eq!(
+        crate_count(
+            &db,
+            "SELECT count(*)::bigint AS count FROM attachments WHERE image_width=160 AND image_height=90"
+        ),
+        1
+    );
+    assert_eq!(
+        crate_count(
+            &db,
+            "SELECT count(*)::bigint AS count FROM attachments WHERE image_width=0 AND image_height=0"
+        ),
+        1
+    );
+}
+
 fn crate_count(db: &Database, sql: &str) -> i64 {
     #[derive(QueryableByName)]
     struct Count {

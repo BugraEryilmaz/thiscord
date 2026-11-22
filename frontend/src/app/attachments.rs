@@ -27,11 +27,17 @@ thread_local! {
 
 /// Bounded: entries are a few bytes, and clearing only costs a re-measure.
 const IMAGE_RATIO_LIMIT: usize = 4096;
-/// Placeholder ratio before an image was ever shown (typical screenshot).
+/// Placeholder ratio for an image without a server size that this client has
+/// not shown yet (typical screenshot).
 const DEFAULT_IMAGE_RATIO: f64 = 16.0 / 9.0;
 
-fn image_ratio(id: thiscord_shared::AttachmentId) -> Option<f64> {
-    IMAGE_RATIOS.with_borrow(|ratios| ratios.get(&id).copied())
+/// Width/height of an image preview: the server's header size when it sent
+/// one, otherwise the ratio this client measured when the image last loaded.
+fn image_ratio(attachment: &ChatAttachment) -> Option<f64> {
+    attachment
+        .image
+        .map(|size| f64::from(size.width) / f64::from(size.height))
+        .or_else(|| IMAGE_RATIOS.with_borrow(|ratios| ratios.get(&attachment.id).copied()))
 }
 
 fn remember_image_ratio(id: thiscord_shared::AttachmentId, image: &web_sys::HtmlImageElement) {
@@ -836,7 +842,8 @@ pub(super) fn Card(
         fetch(false);
     }
     view! {
-        <super::super::message_content::SpoilerCover spoiler>
+        // The cover takes the card's width (see `.spoiler-cover-card`).
+        <super::super::message_content::SpoilerCover spoiler class="spoiler-cover-card">
         <div class="my-2 max-w-sm space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
             // Media reserves its final box while loading (and before the image
             // decodes), so mounting a row does not change its measured height.
@@ -849,7 +856,7 @@ pub(super) fn Card(
                                 let id = attachment.get_value().id;
                                 // Before decode, keep the placeholder's box; `auto` then switches
                                 // to the natural ratio once the image loads.
-                                let ratio = image_ratio(id).map_or_else(|| format!("auto {DEFAULT_IMAGE_RATIO}"), |r| r.to_string());
+                                let ratio = attachment.with_value(image_ratio).map_or_else(|| format!("auto {DEFAULT_IMAGE_RATIO}"), |r| r.to_string());
                                 view! { <img class="max-h-64 w-full rounded object-contain" style:aspect-ratio=ratio src=url alt=attachment.get_value().filename
                                     on:load=move |e| { if let Some(image) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlImageElement>().ok()) { remember_image_ratio(id, &image); } }
                                     on:error=move |_| error.set("Image preview unavailable; download the original file".into())/> }.into_any()
@@ -864,7 +871,7 @@ pub(super) fn Card(
                         } else {
                             "flex h-48 w-full items-center justify-center rounded bg-black text-xs text-white/60"
                         };
-                        let ratio = if kind == PreviewKind::Image { image_ratio(attachment.get_value().id).unwrap_or(DEFAULT_IMAGE_RATIO).to_string() } else { "auto".to_owned() };
+                        let ratio = if kind == PreviewKind::Image { attachment.with_value(image_ratio).unwrap_or(DEFAULT_IMAGE_RATIO).to_string() } else { "auto".to_owned() };
                         view! {
                             <div class=class style:aspect-ratio=ratio role="status">
                                 <Show when=move || busy.get()>{move || crate::i18n::t("Loading attachment…")}</Show>

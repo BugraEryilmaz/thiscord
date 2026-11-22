@@ -82,6 +82,7 @@ async fn main() -> Result<(), BoxError> {
         thiscord_backend::auth::mail::start(pool.clone());
         thiscord_backend::chat::start_attachment_cleanup(pool.clone());
         thiscord_backend::friends::start_attachment_cleanup(pool.clone());
+        thiscord_backend::chat::start_image_size_backfill(pool.clone());
     }
     // Planned restarts drain voice before the HTTP server stops (docs/vps.md).
     let shutdown = thiscord_backend::shutdown::Shutdown::after_restart();

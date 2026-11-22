@@ -213,6 +213,19 @@ pub struct ChatAttachment {
     /// Hidden behind a "Spoiler" cover until the viewer reveals it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub spoiler: bool,
+    /// Displayed pixel size of a PNG, JPEG, GIF or WebP image, read by the server
+    /// from the file header, with EXIF orientation applied. Clients reserve the
+    /// preview's exact box before downloading it. Absent for other files, for
+    /// unreadable headers and on attachments the server has not measured yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageSize>,
+}
+
+/// Image width and height in pixels; both are at least 1.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageSize {
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Server-verified duration plus the uploader's compact amplitude outline.
@@ -584,9 +597,23 @@ mod tests {
             spoiler: true,
             ..attachment
         };
-        let wire = serde_json::to_value(&voice).unwrap();
+        let mut wire = serde_json::to_value(&voice).unwrap();
         assert_eq!(wire["voice"]["duration_ms"], 1500);
         assert_eq!(wire["spoiler"], true);
+        let image = ChatAttachment {
+            image: Some(ImageSize {
+                width: 1600,
+                height: 900,
+            }),
+            ..voice.clone()
+        };
+        let sized = serde_json::to_value(&image).unwrap();
+        assert_eq!(sized["image"], json!({"width":1600,"height":900}));
+        assert!(serde_json::from_value::<ChatAttachment>(sized.clone()).unwrap() == image);
+        // Stored projections write `null` for unmeasured files.
+        wire["image"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ChatAttachment>(wire.clone()).unwrap() == voice);
+        wire = sized;
         // Released 0.1.61 clients decode the attachment as an ordinary file:
         // their struct has exactly the legacy fields and ignores the rest.
         #[derive(Deserialize)]

@@ -676,6 +676,7 @@ mod tests {
             size_bytes: 10,
             voice: None,
             spoiler: false,
+            image: None,
         });
         let ticket = state.begin_pins();
         assert_eq!(

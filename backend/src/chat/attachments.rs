@@ -112,6 +112,8 @@ async fn upload(
             let _permit = permit;
             // Parse before opening the transaction; no connection is held meanwhile.
             let voice = voice_metadata(&upload, &bytes)?;
+            let image = super::image_size::image_size(&bytes);
+            let (image_width, image_height) = super::image_size::columns(image);
             store::checked(&pool, &token, upload.guild_id, Some(upload.channel_id), Some(Permission::SendMessages), |c, actor, _| {
                 // Take the channel's foreign-key lock before the account lock, as
                 // sends do (channel FOR UPDATE, then the account lock in `attach`).
@@ -122,14 +124,15 @@ async fn upload(
                 published(c, actor, upload.guild_id, bytes.len() as u64)?;
                 let attachment = ChatAttachment { id: AttachmentId::from_uuid(Uuid::new_v4()),
                     filename: if voice.is_some() { VOICE_MESSAGE_FILENAME.into() } else { upload.filename },
-                    content_type: classify(&bytes).into(), size_bytes: bytes.len() as u64, voice, spoiler: false };
-                diesel::sql_query("INSERT INTO attachments(id,guild_id,channel_id,owner_id,filename,content_type,size_bytes,data,voice_duration_ms,voice_waveform) VALUES($1,$2,$3,$4,$5,$6,octet_length($7),$7,$8,$9)")
+                    content_type: classify(&bytes).into(), size_bytes: bytes.len() as u64, voice, spoiler: false, image };
+                diesel::sql_query("INSERT INTO attachments(id,guild_id,channel_id,owner_id,filename,content_type,size_bytes,data,voice_duration_ms,voice_waveform,image_width,image_height) VALUES($1,$2,$3,$4,$5,$6,octet_length($7),$7,$8,$9,$10,$11)")
                     .bind::<SqlUuid,_>(attachment.id.as_uuid()).bind::<SqlUuid,_>(upload.guild_id.as_uuid())
                     .bind::<SqlUuid,_>(upload.channel_id.as_uuid()).bind::<SqlUuid,_>(actor.as_uuid())
                     .bind::<Text,_>(&attachment.filename).bind::<Text,_>(&attachment.content_type)
                     .bind::<Binary,_>(bytes.as_ref())
                     .bind::<Nullable<Integer>,_>(attachment.voice.as_ref().map(|v| v.duration_ms as i32))
                     .bind::<Nullable<Text>,_>(attachment.voice.as_ref().map(|v| v.waveform.as_str()))
+                    .bind::<Integer,_>(image_width).bind::<Integer,_>(image_height)
                     .execute(c)?;
                 Ok(attachment)
             })
@@ -274,7 +277,7 @@ impl VoiceUpload for thiscord_shared::friends::DirectAttachmentUpload {
 
 /// Claim-time metadata copied into the message row; Option/false fields are
 /// omitted when serialized, so plain attachments keep their legacy JSON.
-pub(crate) const CLAIMED: &str = "jsonb_build_object('id',id,'filename',filename,'content_type',content_type,'size_bytes',size_bytes,'spoiler',spoiler,'voice',CASE WHEN voice_duration_ms IS NULL THEN NULL ELSE jsonb_build_object('duration_ms',voice_duration_ms,'waveform',voice_waveform) END)";
+pub(crate) const CLAIMED: &str = "jsonb_build_object('id',id,'filename',filename,'content_type',content_type,'size_bytes',size_bytes,'spoiler',spoiler,'voice',CASE WHEN voice_duration_ms IS NULL THEN NULL ELSE jsonb_build_object('duration_ms',voice_duration_ms,'waveform',voice_waveform) END,'image',CASE WHEN image_width>0 THEN jsonb_build_object('width',image_width,'height',image_height) END)";
 
 pub(super) fn attach(
     c: &mut PgConnection,

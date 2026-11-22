@@ -91,16 +91,22 @@ fn spoiler(inner: AnyView) -> AnyView {
 }
 
 /// Covers a spoiler attachment (image, video, file or voice message) with a
-/// blurred "Spoiler" button until the viewer reveals it.
+/// blurred "Spoiler" button until the viewer reveals it. The cover shrinks to
+/// its content unless `class` gives it a width; a virtualized chat card needs
+/// one, or its reserved media box collapses until the image decodes.
 #[component]
-pub(super) fn SpoilerCover(spoiler: bool, children: Children) -> impl IntoView {
+pub(super) fn SpoilerCover(
+    spoiler: bool,
+    #[prop(optional)] class: &'static str,
+    children: Children,
+) -> impl IntoView {
     if !spoiler {
         return children().into_any();
     }
     let revealed = RwSignal::new(false);
     let content = NodeRef::<leptos::html::Div>::new();
     view! {
-        <div class="spoiler-cover" class:spoiler-cover-revealed=move || revealed.get()>
+        <div class=format!("spoiler-cover {class}") class:spoiler-cover-revealed=move || revealed.get()>
             <div node_ref=content class="spoiler-cover-content" tabindex="-1" inert=move || !revealed.get() aria-hidden=move || (!revealed.get()).then_some("true")>{children()}</div>
             <Show when=move || !revealed.get()>
                 <button type="button" class="spoiler-cover-button" aria-label=move || crate::i18n::t("Spoiler attachment, press to reveal")
