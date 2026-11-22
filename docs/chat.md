@@ -60,8 +60,19 @@ another one. Measured anchors are normalized to the row actually on screen so
 later edits/resizing cannot restore an outdated estimated position. Anchors use
 the live layout position rather than the last scroll event, and corrections write
 the scroll offset only when it must move, so they do not interrupt wheel scrolling.
-Image and video previews reserve their box while they load (image aspect ratios
-are remembered per attachment), so rows keep their height when they remount.
+Image and video previews reserve their box while they load, so rows keep their
+height when they mount and remount. The server reads each PNG, JPEG, GIF and WebP
+upload's displayed size from its header (EXIF orientation applied, pixels never
+decoded) and sends it with the attachment, so even an image's first preview gets
+its exact box. Files stored before sizes were recorded are measured once by a
+background backfill after startup, which also adds the size to their messages.
+Without a size, the client uses the ratio it measured when the image last loaded,
+or a 16:9 placeholder.
+Anchors can only compensate for rows above the viewport: a row that changes height
+while it is on screen moves the content below it. Anything wrapping row content,
+such as the spoiler cover, must keep the reserved box. A shrink-to-fit wrapper
+collapses it until the media decodes, so chat cards give their cover the card's
+width.
 Jump to latest overlays the list instead of resizing it.
 Edits update existing row state.
 Following live chat evicts the oldest rows and preserves a cursor to reload them.

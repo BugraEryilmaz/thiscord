@@ -91,17 +91,20 @@ async fn upload(
         let result=tokio::task::spawn_blocking(move || {
             let _permit=permit;
             let voice=crate::chat::attachments::voice_metadata(&upload,&bytes)?;
+            let image=crate::chat::image_size::image_size(&bytes);
+            let (image_width,image_height)=crate::chat::image_size::columns(image);
             store::checked(&pool,&token,upload.conversation_id,true,|c,actor| {
                 // The write check above locked the conversation; the account lock comes second, as in `attach`.
                 lock_owner(c,actor)?;
                 cleanup(c)?;quota(c,actor,bytes.len())?;published(c,actor,upload.conversation_id,bytes.len() as u64)?;
                 let filename=if voice.is_some(){thiscord_shared::voice_message::VOICE_MESSAGE_FILENAME.into()}else{upload.filename};
-                let a=ChatAttachment {id:AttachmentId::from_uuid(Uuid::new_v4()),filename,content_type:crate::chat::attachments::classify(&bytes).into(),size_bytes:bytes.len() as u64,voice,spoiler:false};
-                diesel::sql_query("INSERT INTO direct_attachments(id,conversation_id,owner_id,filename,content_type,size_bytes,data,voice_duration_ms,voice_waveform) VALUES($1,$2,$3,$4,$5,octet_length($6),$6,$7,$8)")
+                let a=ChatAttachment {id:AttachmentId::from_uuid(Uuid::new_v4()),filename,content_type:crate::chat::attachments::classify(&bytes).into(),size_bytes:bytes.len() as u64,voice,spoiler:false,image};
+                diesel::sql_query("INSERT INTO direct_attachments(id,conversation_id,owner_id,filename,content_type,size_bytes,data,voice_duration_ms,voice_waveform,image_width,image_height) VALUES($1,$2,$3,$4,$5,octet_length($6),$6,$7,$8,$9,$10)")
                     .bind::<SqlUuid,_>(a.id.as_uuid()).bind::<SqlUuid,_>(upload.conversation_id.as_uuid()).bind::<SqlUuid,_>(actor.as_uuid())
                     .bind::<Text,_>(&a.filename).bind::<Text,_>(&a.content_type).bind::<Binary,_>(bytes.as_ref())
                     .bind::<Nullable<Integer>,_>(a.voice.as_ref().map(|v|v.duration_ms as i32))
-                    .bind::<Nullable<Text>,_>(a.voice.as_ref().map(|v|v.waveform.as_str())).execute(c)?;
+                    .bind::<Nullable<Text>,_>(a.voice.as_ref().map(|v|v.waveform.as_str()))
+                    .bind::<Integer,_>(image_width).bind::<Integer,_>(image_height).execute(c)?;
                 Ok(a)
             })
         }).await.map_err(|_|Failure::Unavailable)??;

@@ -31,6 +31,7 @@ fn attachments_are_additive_and_empty_sends_remain_legacy_compatible() {
         size_bytes: 12,
         voice: None,
         spoiler: false,
+        image: None,
     });
     let roundtrip: ChatMessage = from_value(to_value(&message).unwrap()).unwrap();
     assert!(roundtrip.attachments == message.attachments);

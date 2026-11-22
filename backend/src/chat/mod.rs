@@ -1,8 +1,10 @@
 pub(crate) mod access;
 pub(crate) mod attachments;
 mod feed;
+pub(crate) mod image_size;
 pub(crate) mod members;
 pub use attachments::start_cleanup as start_attachment_cleanup;
+pub use image_size::start_backfill as start_image_size_backfill;
 mod notifications;
 mod rich;
 mod session;

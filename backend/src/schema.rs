@@ -64,6 +64,8 @@ diesel::table! {
         voice_duration_ms -> Nullable<Int4>,
         voice_waveform -> Nullable<Text>,
         spoiler -> Bool,
+        image_width -> Nullable<Int4>,
+        image_height -> Nullable<Int4>,
     }
 }
 
@@ -142,6 +144,8 @@ diesel::table! {
         voice_duration_ms -> Nullable<Int4>,
         voice_waveform -> Nullable<Text>,
         spoiler -> Bool,
+        image_width -> Nullable<Int4>,
+        image_height -> Nullable<Int4>,
     }
 }
 
