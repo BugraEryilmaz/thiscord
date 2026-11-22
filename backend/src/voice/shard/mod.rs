@@ -453,6 +453,26 @@ enum Wake {
     Timer,
 }
 
+/// Stands in for "no deadline", so the shard keeps one reusable timer entry.
+fn far_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(86_400)
+}
+
+/// Points the shard's sleep at `next`, or at a far deadline while there is none.
+/// A sleep that already fired is re-armed even when the deadline is unchanged:
+/// an elapsed sleep stays ready, so an idle shard would otherwise spin a core
+/// once its far deadline passed.
+fn arm(
+    sleep: std::pin::Pin<&mut tokio::time::Sleep>,
+    armed: &mut Option<Instant>,
+    next: Option<Instant>,
+) {
+    if next != *armed || sleep.is_elapsed() {
+        sleep.reset(next.unwrap_or_else(far_deadline).max(Instant::now()).into());
+        *armed = next;
+    }
+}
+
 impl Shard {
     fn new(socket: udp::Socket, media: tokio::runtime::Handle) -> Self {
         Self {
@@ -475,19 +495,11 @@ impl Shard {
     }
 
     async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
-        // A far deadline instead of an Option keeps one reusable timer entry.
-        let far = || Instant::now() + Duration::from_secs(86_400);
-        let sleep = tokio::time::sleep_until(far().into());
+        let sleep = tokio::time::sleep_until(far_deadline().into());
         tokio::pin!(sleep);
         let mut armed: Option<Instant> = None;
         loop {
-            let next = self.next_deadline();
-            if next != armed {
-                sleep
-                    .as_mut()
-                    .reset(next.unwrap_or_else(far).max(Instant::now()).into());
-                armed = next;
-            }
+            arm(sleep.as_mut(), &mut armed, self.next_deadline());
             let wake = tokio::select! { biased;
                 command = commands.recv() => Wake::Command(command),
                 ready = self.socket.readable() => Wake::Readable(ready),
@@ -510,7 +522,8 @@ impl Shard {
                     tracing::error!(%error, "voice shard socket failed");
                     break;
                 }
-                Wake::Timer => armed = None,
+                // `arm` re-arms the fired sleep on the next round.
+                Wake::Timer => {}
             }
             self.timeouts();
             self.process().await;
@@ -901,6 +914,23 @@ impl Shard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_idle_shard_rearms_its_fired_far_deadline() {
+        // The far deadline of a shard without peers fires with nothing armed.
+        let sleep = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(sleep);
+        sleep.as_mut().await;
+        let mut armed = None;
+        arm(sleep.as_mut(), &mut armed, None);
+        assert!(!sleep.is_elapsed());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), sleep.as_mut())
+                .await
+                .is_err(),
+            "a fired sleep left as is stays ready and spins the shard loop"
+        );
+    }
 
     #[test]
     fn transport_configuration_is_validated() {
