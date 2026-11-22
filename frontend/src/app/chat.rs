@@ -929,6 +929,37 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SpacerEdge {
+    Before,
+    After,
+}
+
+/// One entry of the virtual message list: a mounted row, or the spacer that
+/// stands in for the unmounted rows above or below the window.
+#[derive(Clone)]
+enum Slot {
+    Spacer(SpacerEdge, f64),
+    Row(u64, MessageId, ArcRwSignal<ChatMessage>),
+}
+
+#[derive(PartialEq, Eq, Hash)]
+enum SlotKey {
+    /// A new height is a new key: the list replaces the spacer in the same
+    /// update that mounts or unmounts the rows it accounts for.
+    Spacer(SpacerEdge, u64),
+    Row(u64, MessageId),
+}
+
+impl Slot {
+    fn key(&self) -> SlotKey {
+        match self {
+            Self::Spacer(edge, height) => SlotKey::Spacer(*edge, height.to_bits()),
+            Self::Row(generation, id, _) => SlotKey::Row(*generation, *id),
+        }
+    }
+}
+
 /// Observers and callbacks are disposed with the keyed row/effect that owns them.
 fn observe_size(element: &web_sys::Element, callback: impl FnMut() + 'static) {
     let callback = Closure::<dyn FnMut()>::new(callback);
@@ -1452,17 +1483,28 @@ pub(super) fn ChatPanel(
                     </Show>
                 </div>
                 <ul node_ref=chat.rows aria-label=move || crate::i18n::t("Message history")>
-                    <li aria-hidden="true" style:height=move || visible.with(|w| format!("{}px", w.before))></li>
+                    // The spacers are entries of the same keyed list as the rows
+                    // (keyed by height), so one diff swaps a row for spacer height.
+                    // Separate spacer effects could land a frame later: the list
+                    // briefly lost a row's height, and near the bottom the browser
+                    // clamped the scroll position back up on every wheel step.
                     <For
                         each=move || {
                             let generation = chat.history_generation.get();
-                            visible.with(|w| chat.messages.with_untracked(|cache| w.ids.iter()
-                                .filter_map(|id| cache.get(*id).map(|row| (generation, *id, row.clone()))).collect::<Vec<_>>()))
+                            visible.with(|w| chat.messages.with_untracked(|cache| {
+                                let mut slots = Vec::with_capacity(w.ids.len() + 2);
+                                slots.push(Slot::Spacer(SpacerEdge::Before, w.before));
+                                slots.extend(w.ids.iter().filter_map(|id| cache.get(*id).map(|row| Slot::Row(generation, *id, row.clone()))));
+                                slots.push(Slot::Spacer(SpacerEdge::After, w.after));
+                                slots
+                            }))
                         }
-                        key=|(generation, id, _)| (*generation, *id)
-                        children=move |(_, id, message)| view! { <MessageRow chat id message composer/> }
+                        key=Slot::key
+                        children=move |slot| match slot {
+                            Slot::Spacer(_, height) => view! { <li aria-hidden="true" style:height=format!("{height}px")></li> }.into_any(),
+                            Slot::Row(_, id, message) => view! { <MessageRow chat id message composer/> }.into_any(),
+                        }
                     />
-                    <li aria-hidden="true" style:height=move || visible.with(|w| format!("{}px", w.after))></li>
                 </ul>
                 <ul class="mt-4 space-y-3">
                     <For each=move || chat.pending.with(|p| p.iter().map(|p| p.id).collect::<Vec<_>>()) key=|id| *id
