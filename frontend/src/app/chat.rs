@@ -59,6 +59,9 @@ pub(super) struct Chat {
     scrolls: RwSignal<u64>,
     refresh: RwSignal<u64>,
     history_generation: RwSignal<u64>,
+    /// Advances when a context window replaces the cache, so rows for the same
+    /// IDs remount with the new row signals. Part of the row keys.
+    rows_generation: RwSignal<u64>,
     history_loading: RwSignal<bool>,
     ready: RwSignal<bool>,
     bottom: RwSignal<bool>,
@@ -280,6 +283,7 @@ impl Chat {
             .update(|p| p.retain(|p| !delivered.contains(&p.id)));
         self.messages.update(|cache| {
             if replace {
+                self.rows_generation.update(|g| *g += 1);
                 *cache = MessageCache::default();
                 // A context window must never acknowledge the live edge as read.
                 cache.newer = true;
@@ -298,6 +302,9 @@ impl Chat {
                 }
             }
         });
+        // The rows' ResizeObserver misses a prepend that evicts rows of the same
+        // total height; settle after the list update regardless.
+        request_animation_frame(move || self.settle());
     }
     fn merge(self, message: ChatMessage) {
         self.merge_batch(
@@ -1117,6 +1124,7 @@ pub(super) fn ChatPanel(
         scrolls: RwSignal::new(0),
         refresh: RwSignal::new(0),
         history_generation: RwSignal::new(0),
+        rows_generation: RwSignal::new(0),
         history_loading: RwSignal::new(false),
         ready: RwSignal::new(false),
         bottom: RwSignal::new(true),
@@ -1137,6 +1145,9 @@ pub(super) fn ChatPanel(
             chat.unread_on_open.set(count);
         }
     });
+    // Search replaces the list. Hide it only after remembering the row being
+    // read: a hidden list has no layout to remember it from.
+    let list_hidden = RwSignal::new(search.active.get_untracked());
     Effect::new(move |was_searching: Option<bool>| {
         let searching = search.active.get();
         if searching && was_searching == Some(false) {
@@ -1144,7 +1155,9 @@ pub(super) fn ChatPanel(
             if !chat.bottom.get_untracked() {
                 chat.keep.set(chat.first_visible());
             }
+            list_hidden.set(true);
         } else if !searching && was_searching == Some(true) {
+            list_hidden.set(false);
             // Settle once the list is displayed again.
             request_animation_frame(move || chat.settle());
         }
@@ -1175,11 +1188,14 @@ pub(super) fn ChatPanel(
             observe_size(node.unchecked_ref(), move || chat.settle());
         }
     });
-    Effect::new(move |_| {
-        if let Some(node) = chat.rows.get() {
-            observe_size(node.unchecked_ref(), move || chat.settle());
-        }
-    });
+    let pending_rows = NodeRef::<leptos::html::Ul>::new();
+    for rows in [chat.rows, pending_rows] {
+        Effect::new(move |_| {
+            if let Some(node) = rows.get() {
+                observe_size(node.unchecked_ref(), move || chat.settle());
+            }
+        });
+    }
     ui.active_chat.set(Some(chat));
     Effect::new(move |_| {
         if chat.ready.get()
@@ -1421,7 +1437,7 @@ pub(super) fn ChatPanel(
             })/>
             // The jump button overlays the list: toggling it must not resize the
             // scroller, or reaching the live edge would shift the content.
-            <div class="relative flex min-h-0 flex-1 flex-col" style:display=move ||if search.active.get(){"none"}else{""}>
+            <div class="relative flex min-h-0 flex-1 flex-col" style:display=move ||if list_hidden.get(){"none"}else{""}>
             <div node_ref=chat.list role="region" tabindex="0" aria-label=move || crate::i18n::t("Messages") class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4"
                 style:padding-bottom=move || chat.messages.with(|m| m.newer).then_some("3.5rem") on:scroll=move |_|chat.scrolled()>
                 <div class="h-10">
@@ -1434,14 +1450,14 @@ pub(super) fn ChatPanel(
                 <ul node_ref=chat.rows aria-label=move || crate::i18n::t("Message history")>
                     <For
                         each=move || {
-                            let generation = chat.history_generation.get();
+                            let generation = chat.rows_generation.get();
                             chat.messages.with(|cache| cache.ordered().map(|(id, row)| (generation, id, row.clone())).collect::<Vec<_>>())
                         }
                         key=|(generation, id, _)| (*generation, *id)
                         children=move |(_, id, message)| view! { <MessageRow chat id message composer/> }
                     />
                 </ul>
-                <ul class="mt-4 space-y-3">
+                <ul node_ref=pending_rows class="mt-4 space-y-3">
                     <For each=move || chat.pending.with(|p| p.iter().map(|p| p.id).collect::<Vec<_>>()) key=|id| *id
                         children=move |id| {
                             let pending = Memo::new(move |_| chat.pending.with(|p| p.iter().find(|p| p.id == id).cloned()));

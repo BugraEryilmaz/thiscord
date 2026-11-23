@@ -109,21 +109,46 @@ pub(super) fn DownloadHost(chat: Chat) -> impl IntoView {
     }
 }
 
+/// A card's key and the callback that releases its loaded preview.
+type Reclaimable = (u64, Rc<dyn Fn()>);
+
+thread_local! {
+    /// Loaded chat previews that scrolled out of reach, oldest first. They keep
+    /// their blob (no download when they return) until the preview budget is
+    /// full; then the oldest release it, keeping their reserved box.
+    static OFFSCREEN: RefCell<Vec<Reclaimable>> = RefCell::default();
+    static NEXT_CARD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Releases the oldest offscreen preview; false when none is left.
+fn reclaim_offscreen() -> bool {
+    let oldest = OFFSCREEN.with_borrow_mut(|cards| (!cards.is_empty()).then(|| cards.remove(0)));
+    oldest.is_some_and(|(_, release)| {
+        release();
+        true
+    })
+}
+
 pub(in crate::app) struct Permit {
     bytes: u64,
     active: bool,
 }
 impl Permit {
     fn new(bytes: u64) -> Result<Self, String> {
-        BUDGET
-            .with_borrow_mut(|b| b.reserve(bytes))
-            .then(|| Self {
-                bytes,
-                active: true,
-            })
-            .ok_or_else(|| {
-                "Preview capacity reached. Close another preview or scroll away, then retry.".into()
-            })
+        loop {
+            if BUDGET.with_borrow_mut(|b| b.reserve(bytes)) {
+                return Ok(Self {
+                    bytes,
+                    active: true,
+                });
+            }
+            if !reclaim_offscreen() {
+                return Err(
+                    "Preview capacity reached. Close another preview or scroll away, then retry."
+                        .into(),
+                );
+            }
+        }
     }
     pub(in crate::app) async fn acquire(bytes: u64) -> Result<Self, String> {
         while BUDGET.with_borrow(FetchBudget::slots_full) {
@@ -839,26 +864,45 @@ pub(super) fn Card(
     };
     // Media previews fetch once they come within 800 px of the visible list, so
     // opening or paging back through history does not download every image.
+    // Out of reach, a loaded preview becomes reclaimable (see `OFFSCREEN`).
     // Generic files never fetch without a click.
     let card = NodeRef::<leptos::html::Div>::new();
+    let card_key = NEXT_CARD.with(|next| {
+        let key = next.get();
+        next.set(key + 1);
+        key
+    });
+    let reachable =
+        move || OFFSCREEN.with_borrow_mut(|cards| cards.retain(|(k, _)| *k != card_key));
+    on_cleanup(reachable);
     if kind != PreviewKind::File {
         Effect::new(move |_| {
             let (Some(node), Some(root)) = (card.get(), chat.list.get()) else {
                 return;
             };
-            let near = Closure::<dyn FnMut(js_sys::Array, web_sys::IntersectionObserver)>::new(
-                move |entries: js_sys::Array, observer: web_sys::IntersectionObserver| {
-                    let visible = entries.iter().any(|entry| {
-                        entry
-                            .unchecked_into::<web_sys::IntersectionObserverEntry>()
-                            .is_intersecting()
-                    });
-                    if visible {
-                        observer.disconnect();
+            let near = Closure::<dyn FnMut(js_sys::Array)>::new(move |entries: js_sys::Array| {
+                let Some(entry) = entries.iter().last() else {
+                    return;
+                };
+                if entry
+                    .unchecked_into::<web_sys::IntersectionObserverEntry>()
+                    .is_intersecting()
+                {
+                    reachable();
+                    if error.with_untracked(String::is_empty) {
                         fetch(false);
                     }
-                },
-            );
+                } else if loaded.with_value(Option::is_some) {
+                    let release: Rc<dyn Fn()> = Rc::new(move || {
+                        if alive.try_get_untracked() == Some(true) && !viewer.get_untracked() {
+                            loaded.set_value(None);
+                            url.set(None);
+                        }
+                    });
+                    reachable();
+                    OFFSCREEN.with_borrow_mut(|cards| cards.push((card_key, release)));
+                }
+            });
             let options = web_sys::IntersectionObserverInit::new();
             options.set_root(Some(&root));
             options.set_root_margin("800px 0px");
