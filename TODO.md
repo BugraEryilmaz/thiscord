@@ -169,7 +169,7 @@ and single-process chat/media enforcement.
 - [x] Heartbeats, disconnect cleanup, reconnect/backoff and resynchronization.
 - [x] Persist/send messages, server IDs/ordering and client deduplication.
 - [x] Cursor-paginated history, permission-checked edit/delete and live updates.
-- [x] Bounded message cache, ID lookup, batched history merges and measured keyed virtual chat rows.
+- [x] Bounded message cache, ID lookup, batched history merges and keyed chat rows with native scroll anchoring.
 - [x] History/composer UI with pending/failed/retry states and scroll behavior.
 - [x] Unread markers, mentions, typing indicators and online presence.
 - [x] Guild mention autocomplete by public profile name or username, showing both names with keyboard and pointer selection.

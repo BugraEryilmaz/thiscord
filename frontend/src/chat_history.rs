@@ -1,14 +1,10 @@
-//! Bounded, ID-indexed history and variable-height window geometry, independent of the DOM.
+//! Bounded, ID-indexed message history in channel order, independent of the DOM.
 use std::collections::{BTreeMap, HashMap};
 use thiscord_shared::{AccountId, MessageId, Timestamp, chat::ChatMessage, pagination::PageCursor};
 
 pub const RESIDENT_LIMIT: usize = 500;
-pub const ESTIMATED_HEIGHT: f64 = 112.0;
-/// Floor for measured rows; grouped follow-up messages can be a single line.
-pub const MIN_ROW_HEIGHT: f64 = 24.0;
 /// Consecutive messages by one author within this window share a header.
 pub const GROUP_WINDOW_SECONDS: i64 = 7 * 60;
-const OVERSCAN: f64 = 400.0;
 
 /// Whether a message shares the previous message's author header: same known
 /// author, sent in order and within [`GROUP_WINDOW_SECONDS`].
@@ -28,7 +24,6 @@ struct Entry<T> {
     revision: i32,
     sequence: i64,
     cursor: PageCursor,
-    height: f64,
 }
 
 pub struct MessageCache<T> {
@@ -56,22 +51,10 @@ pub enum Merge {
     Older,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Anchor {
-    id: MessageId,
-    offset: f64,
-}
-
-#[derive(Clone, Default, PartialEq)]
-pub struct Window {
-    pub ids: Vec<MessageId>,
-    pub before: f64,
-    pub after: f64,
-}
-
 impl<T> MessageCache<T> {
-    pub fn target_anchor(&self, id: MessageId) -> Anchor {
-        Anchor { id, offset: 0.0 }
+    /// Resident rows in channel order, oldest first.
+    pub fn ordered(&self) -> impl Iterator<Item = (MessageId, &T)> {
+        self.order.values().map(|id| (*id, &self.by_id[id].value))
     }
 
     pub fn values(&self) -> impl Iterator<Item = &T> {
@@ -142,7 +125,6 @@ impl<T> MessageCache<T> {
                     revision: message.revision,
                     sequence: message.sequence,
                     cursor: PageCursor::new(message.created_at, message.id.as_uuid()),
-                    height: ESTIMATED_HEIGHT,
                     value: create(message),
                 },
             );
@@ -164,73 +146,6 @@ impl<T> MessageCache<T> {
                     .map(|(_, id)| self.by_id[id].cursor.clone());
             }
         }
-    }
-
-    pub fn measure(&mut self, id: MessageId, height: f64) -> bool {
-        if !height.is_finite() {
-            return false;
-        }
-        let Some(entry) = self.by_id.get_mut(&id) else {
-            return false;
-        };
-        let height = height.max(MIN_ROW_HEIGHT);
-        if (entry.height - height).abs() < 0.5 {
-            return false;
-        }
-        entry.height = height;
-        true
-    }
-
-    pub fn anchor(&self, top: f64) -> Option<Anchor> {
-        let mut y = 0.0;
-        for id in self.order.values() {
-            let height = self.by_id[id].height;
-            if y + height > top {
-                return Some(Anchor {
-                    id: *id,
-                    offset: top - y,
-                });
-            }
-            y += height;
-        }
-        None
-    }
-
-    pub fn anchor_top(&self, anchor: Anchor) -> Option<f64> {
-        let mut y = 0.0;
-        for id in self.order.values() {
-            if *id == anchor.id {
-                return Some(y + anchor.offset);
-            }
-            y += self.by_id[id].height;
-        }
-        None
-    }
-
-    /// A measured row can be shorter than its estimated anchor offset. Keep the
-    /// same pixel position, but attach it to the row that now contains it so a
-    /// later edit/resize of the preceding row cannot pull the viewport backward.
-    pub fn normalize_anchor(&self, anchor: Anchor) -> Option<Anchor> {
-        self.anchor(self.anchor_top(anchor)?)
-    }
-
-    pub fn window(&self, top: f64, viewport: f64) -> Window {
-        let mut result = Window::default();
-        let mut y = 0.0;
-        let start = (top - OVERSCAN).max(0.0);
-        let end = top.max(0.0) + viewport.max(0.0) + OVERSCAN;
-        for id in self.order.values() {
-            let height = self.by_id[id].height;
-            if y + height <= start {
-                result.before += height;
-            } else if y < end {
-                result.ids.push(*id);
-            } else {
-                result.after += height;
-            }
-            y += height;
-        }
-        result
     }
 }
 
@@ -330,7 +245,6 @@ mod tests {
             (501..=1000).map(message).collect(),
             Merge::Older,
         );
-        let anchor = cache.anchor(100.0).unwrap();
         merge(&mut cache, (451..=500).map(message).collect(), Merge::Older);
         assert_eq!(
             cache.order.first_key_value().map(|(seq, _)| *seq),
@@ -338,10 +252,6 @@ mod tests {
         );
         assert_eq!(cache.latest_sequence(), 950);
         assert!(cache.newer);
-        assert_eq!(
-            cache.anchor_top(anchor),
-            Some(100.0 + 50.0 * ESTIMATED_HEIGHT)
-        );
         // Live sends cannot append across the evicted gap, even at the window's bottom.
         merge(
             &mut cache,
@@ -361,7 +271,6 @@ mod tests {
     fn live_traffic_does_not_evict_the_window_being_read() {
         let mut cache = MessageCache::default();
         merge(&mut cache, (1..=500).map(message).collect(), Merge::Older);
-        let anchor = cache.anchor(600.0).unwrap();
         for sequence in 501..=1500 {
             merge(
                 &mut cache,
@@ -369,82 +278,17 @@ mod tests {
                 Merge::Live { follow: false },
             );
         }
-        assert_eq!(cache.anchor_top(anchor), Some(600.0));
+        // The rows being read stay resident; newer traffic waits outside.
+        assert_eq!(
+            cache.ordered().next().map(|(id, _)| id),
+            Some(message(1).id)
+        );
         assert_eq!(cache.latest_sequence(), 500);
         assert!(cache.newer);
     }
 
     #[test]
-    fn measured_window_covers_viewport_and_preserves_anchor_on_resize() {
-        let mut cache = MessageCache::default();
-        merge(&mut cache, (1..=500).map(message).collect(), Merge::Older);
-        let top = 50.0 * ESTIMATED_HEIGHT + 20.0;
-        let anchor = cache.anchor(top).unwrap();
-        assert!(cache.measure(message(49).id, 3000.0));
-        assert!(!cache.measure(message(49).id, 3000.0));
-        assert_eq!(
-            cache.anchor_top(anchor),
-            Some(top + 3000.0 - ESTIMATED_HEIGHT)
-        );
-        for height in [300.0, 800.0, 2000.0] {
-            let view = cache.window(top, height);
-            assert!(
-                view.ids.len() <= ((height + 2.0 * OVERSCAN) / MIN_ROW_HEIGHT).ceil() as usize + 2
-            );
-            assert!(view.before <= top);
-            let rendered: f64 = view.ids.iter().map(|id| cache.by_id[id].height).sum();
-            assert!(view.before + rendered >= top + height);
-            assert_eq!(
-                view.before + rendered + view.after,
-                499.0 * ESTIMATED_HEIGHT + 3000.0
-            );
-        }
-        // Shrinking the long row (e.g. deletion) restores the original anchor offset.
-        cache.measure(message(49).id, ESTIMATED_HEIGHT);
-        assert_eq!(cache.anchor_top(anchor), Some(top));
-    }
-
-    #[test]
-    fn measured_anchor_tracks_the_visible_row_after_an_estimate_shrinks() {
-        let mut cache = MessageCache::default();
-        merge(&mut cache, (1..=10).map(message).collect(), Merge::Older);
-        let estimated = cache.anchor(100.0).unwrap();
-        cache.measure(message(1).id, 80.0);
-        let measured = cache.normalize_anchor(estimated).unwrap();
-        assert_eq!(measured.id, message(2).id);
-        assert_eq!(measured.offset, 20.0);
-        assert_eq!(cache.anchor_top(measured), Some(100.0));
-
-        // An edit or a narrow window makes the preceding row taller. Retaining
-        // the estimated anchor would incorrectly put message 1 back on screen.
-        cache.measure(message(1).id, 240.0);
-        assert_eq!(cache.anchor_top(measured), Some(260.0));
-        assert_eq!(cache.normalize_anchor(measured), Some(measured));
-    }
-
-    #[test]
-    fn normalized_anchor_handles_large_shrinks_and_history_control_offsets() {
-        let mut cache = MessageCache::default();
-        merge(&mut cache, (1..=10).map(message).collect(), Merge::Older);
-        let above = cache.anchor(-56.0).unwrap();
-        assert_eq!(cache.normalize_anchor(above), Some(above));
-        cache.measure(message(1).id, 600.0);
-        let tall = cache.anchor(550.0).unwrap();
-        cache.measure(message(1).id, 80.0);
-        let visible = cache.normalize_anchor(tall).unwrap();
-        assert_ne!(visible.id, tall.id);
-        assert_eq!(cache.anchor_top(visible), Some(550.0));
-        cache.measure(message(1).id, 600.0);
-        assert_eq!(cache.anchor_top(visible), Some(1070.0));
-        assert!(
-            cache
-                .normalize_anchor(cache.target_anchor(message(11).id))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn eviction_drops_row_state_and_measurements() {
+    fn eviction_drops_row_state() {
         struct Row(Rc<Cell<usize>>);
         impl Drop for Row {
             fn drop(&mut self) {
@@ -460,33 +304,10 @@ mod tests {
                 |_| Row(dropped.clone()),
                 |_, _| {},
             );
-            cache.measure(message(sequence).id, 200.0);
         }
         assert_eq!(dropped.get(), 1500);
         drop(cache);
         assert_eq!(dropped.get(), 2000);
-    }
-
-    #[test]
-    fn prepend_measurements_keep_the_original_message_below_the_history_control() {
-        let mut cache = MessageCache::default();
-        merge(&mut cache, (101..=150).map(message).collect(), Merge::Older);
-        // The first message begins below the history button and container padding.
-        let anchor = cache.anchor(-56.0).unwrap();
-        merge(&mut cache, (51..=100).map(message).collect(), Merge::Older);
-        assert_eq!(
-            cache.anchor_top(anchor),
-            Some(50.0 * ESTIMATED_HEIGHT - 56.0)
-        );
-        for sequence in 95..=100 {
-            cache.measure(message(sequence).id, 96.0);
-        }
-        assert_eq!(
-            cache.anchor_top(anchor),
-            Some(50.0 * ESTIMATED_HEIGHT - 56.0 - 6.0 * 16.0)
-        );
-        assert!(!cache.measure(message(101).id, f64::NAN));
-        assert!(!cache.measure(message(101).id, f64::INFINITY));
     }
 
     #[test]
@@ -504,6 +325,8 @@ mod tests {
         );
         assert!(cache.previous(message(3).id).is_none());
         assert!(cache.previous(message(9).id).is_none());
+        let order: Vec<_> = cache.ordered().map(|(id, _)| id).collect();
+        assert_eq!(order, [3, 4, 5].map(|s| message(s).id));
         assert_eq!(cache.latest_where(|m| m.sequence < 5), Some(message(4).id));
         assert_eq!(cache.latest_where(|_| false), None);
     }

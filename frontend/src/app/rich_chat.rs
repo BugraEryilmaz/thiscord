@@ -35,10 +35,10 @@ impl Chat {
         self.rich.update(RichChat::cancel_context);
         self.highlight.set(Some(id));
         self.bottom.set(false);
+        self.keep.set(None);
+        self.reveal.set(Some(id));
         if self.messages.with_untracked(|m| m.get(id).is_some()) {
-            self.anchor
-                .set(Some(self.messages.with_untracked(|m| m.target_anchor(id))));
-            self.scroll();
+            self.settle();
             return;
         }
         let generation = self.history_generation.get_untracked();
@@ -81,9 +81,8 @@ impl Chat {
                         m.older = history.older;
                         m.newer = true;
                     });
-                    self.anchor
-                        .set(Some(self.messages.with_untracked(|m| m.target_anchor(id))));
-                    self.scroll();
+                    // The rows' ResizeObserver centers the target once it renders.
+                    self.reveal.set(Some(id));
                 }
                 Err(error) => self.status.set(error),
                 _ => {}
@@ -148,7 +147,7 @@ pub(super) fn Reply(chat: Chat, message: RwSignal<ChatMessage>) -> impl IntoView
     </Show>}
 }
 /// A small button panel with the same surface as the app's context menus.
-/// Listeners exist only while open and are released with the virtualized row.
+/// Listeners exist only while open and are released with the row.
 #[component]
 fn ActionPopover(
     chat: Chat,
@@ -168,7 +167,7 @@ fn ActionPopover(
         open.set(false);
     };
     Effect::new(move |_| {
-        chat.viewport.track();
+        chat.scrolls.track();
         chat.access_generation.track();
         open.set(false);
     });

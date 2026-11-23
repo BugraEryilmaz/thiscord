@@ -113,9 +113,9 @@ support: bots have no WebView and therefore do not supply UI measurements.
    start, which would need listening tests.
 
 7. **UI geometry work and the admin dashboard can stall the main thread.**
-   Chat is already virtualized with a 500-message cache and batched merges.
-   `app/chat.rs` still performs geometry reads in viewport updates and row resize
-   callbacks, potentially forcing layout. **Chat batch merge** and **Chat layout /
+   Chat renders its 500-message cache with batched merges; it is no longer
+   virtualized (see chat.md). `app/chat.rs` reads geometry only in list and row
+   resize callbacks and before history merges. **Chat batch merge** and **Chat layout /
    viewport** measure synchronous work, not browser paint or total frame latency.
    The admin dashboard reloads all channel names in SQL and recreates room views
    every five seconds; **Admin diagnostics collection** measures its backend cost.
