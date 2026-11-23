@@ -59,8 +59,8 @@ pub(super) struct Chat {
     scrolls: RwSignal<u64>,
     refresh: RwSignal<u64>,
     history_generation: RwSignal<u64>,
-    /// Advances when a context window replaces the cache, so rows for the same
-    /// IDs remount with the new row signals. Part of the row keys.
+    /// Advances when the cache is replaced (reset, context window), so rows for
+    /// the same IDs remount with the new row signals. Part of the row keys.
     rows_generation: RwSignal<u64>,
     history_loading: RwSignal<bool>,
     ready: RwSignal<bool>,
@@ -342,6 +342,9 @@ impl Chat {
         self.first_unread.set(first.filter(|_| remaining == 0));
     }
     fn reset(self) {
+        // A reconnect snapshot refills the cache before the list renders, with
+        // new row signals for the same IDs: remount the rows.
+        self.rows_generation.update(|g| *g += 1);
         self.rich.update(RichChat::reset);
         self.reply_to.set(None);
         self.highlight.set(None);

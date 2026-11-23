@@ -769,6 +769,27 @@ pub(super) fn Card(
             finish_download(&download_url, None);
         });
     };
+    let card_key = NEXT_CARD.with(|next| {
+        let key = next.get();
+        next.set(key + 1);
+        key
+    });
+    let reachable =
+        move || OFFSCREEN.with_borrow_mut(|cards| cards.retain(|(k, _)| *k != card_key));
+    on_cleanup(reachable);
+    // Whether the card is out of its IntersectionObserver's reach. A loaded
+    // preview out of reach is reclaimable when the budget needs room.
+    let offscreen = StoredValue::new(false);
+    let reclaimable = move || {
+        let release: Rc<dyn Fn()> = Rc::new(move || {
+            if alive.try_get_untracked() == Some(true) && !viewer.get_untracked() {
+                loaded.set_value(None);
+                url.set(None);
+            }
+        });
+        reachable();
+        OFFSCREEN.with_borrow_mut(|cards| cards.push((card_key, release)));
+    };
     let fetch = move |download_after: bool| {
         if !valid() || busy.get_untracked() {
             return;
@@ -847,6 +868,10 @@ pub(super) fn Card(
                                         blob,
                                         _permit: permit,
                                     })));
+                                    // Finished after scrolling out of reach.
+                                    if offscreen.get_value() {
+                                        reclaimable();
+                                    }
                                     if download_after {
                                         start_download();
                                     }
@@ -867,14 +892,6 @@ pub(super) fn Card(
     // Out of reach, a loaded preview becomes reclaimable (see `OFFSCREEN`).
     // Generic files never fetch without a click.
     let card = NodeRef::<leptos::html::Div>::new();
-    let card_key = NEXT_CARD.with(|next| {
-        let key = next.get();
-        next.set(key + 1);
-        key
-    });
-    let reachable =
-        move || OFFSCREEN.with_borrow_mut(|cards| cards.retain(|(k, _)| *k != card_key));
-    on_cleanup(reachable);
     if kind != PreviewKind::File {
         Effect::new(move |_| {
             let (Some(node), Some(root)) = (card.get(), chat.list.get()) else {
@@ -888,19 +905,16 @@ pub(super) fn Card(
                     .unchecked_into::<web_sys::IntersectionObserverEntry>()
                     .is_intersecting()
                 {
+                    offscreen.set_value(false);
                     reachable();
                     if error.with_untracked(String::is_empty) {
                         fetch(false);
                     }
-                } else if loaded.with_value(Option::is_some) {
-                    let release: Rc<dyn Fn()> = Rc::new(move || {
-                        if alive.try_get_untracked() == Some(true) && !viewer.get_untracked() {
-                            loaded.set_value(None);
-                            url.set(None);
-                        }
-                    });
-                    reachable();
-                    OFFSCREEN.with_borrow_mut(|cards| cards.push((card_key, release)));
+                } else {
+                    offscreen.set_value(true);
+                    if loaded.with_value(Option::is_some) {
+                        reclaimable();
+                    }
                 }
             });
             let options = web_sys::IntersectionObserverInit::new();
