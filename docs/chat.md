@@ -73,6 +73,10 @@ while it is on screen moves the content below it. Anything wrapping row content,
 such as the spoiler cover, must keep the reserved box. A shrink-to-fit wrapper
 collapses it until the media decodes, so chat cards give their cover the card's
 width.
+Spacers are entries of the same keyed list as the rows, keyed by their height, so
+one list update swaps a row for spacer height. As separate reactive updates they
+could reach the screen a frame apart; for that frame the list was a row shorter,
+and near the bottom the browser clamped the scroll position back up on every step.
 Jump to latest overlays the list instead of resizing it.
 Edits update existing row state.
 Following live chat evicts the oldest rows and preserves a cursor to reload them.
