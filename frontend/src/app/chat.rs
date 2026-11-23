@@ -7,7 +7,7 @@ use futures_util::{
 use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 use std::collections::HashSet;
-use thiscord_frontend::chat_history::{Anchor, Merge, MessageCache};
+use thiscord_frontend::chat_history::{Merge, MessageCache};
 use thiscord_frontend::rich_chat::{RichChat, SnapshotStatus};
 use thiscord_shared::{
     ChannelId, ClientMessageId, GuildId, MessageId,
@@ -27,6 +27,13 @@ use thiscord_frontend::attachments::{PendingSend as Pending, can_send};
 
 const PENDING_LIMIT: usize = 20;
 
+/// A message row and its offset from the top of the visible list.
+#[derive(Clone, PartialEq)]
+struct Keep {
+    id: String,
+    offset: f64,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Chat {
     ui: Ui,
@@ -42,10 +49,14 @@ pub(super) struct Chat {
     permissions: RwSignal<Permissions>,
     list: NodeRef<leptos::html::Div>,
     rows: NodeRef<leptos::html::Ul>,
-    viewport: RwSignal<(f64, f64)>,
-    layout_pending: RwSignal<bool>,
+    /// The last scroll offset the app wrote, to tell its writes from the user's.
     programmatic_top: RwSignal<Option<i32>>,
-    anchor: RwSignal<Option<Anchor>>,
+    /// The row being read, kept in place while content above it changes.
+    keep: RwSignal<Option<Keep>>,
+    /// A message to center once its row is in the list (jumps).
+    reveal: RwSignal<Option<MessageId>>,
+    /// Advances on every list scroll; open message popovers close.
+    scrolls: RwSignal<u64>,
     refresh: RwSignal<u64>,
     history_generation: RwSignal<u64>,
     history_loading: RwSignal<bool>,
@@ -138,119 +149,105 @@ impl Chat {
         }
         result
     }
-    fn remember_anchor(self) {
-        if self.bottom.get_untracked() {
-            self.anchor.set(None);
-        } else if self.anchor.get_untracked().is_none() {
-            // Retain the same message across subsequent measurement passes.
-            // Recapturing after a prepend can anchor a newly inserted row and
-            // shift the original message when that row's estimate is corrected.
-            // Read the live position: the viewport signal only advances on the
-            // next scroll event, and anchoring to it would pull an in-progress
-            // wheel scroll back to where the previous event left it.
-            let top = self
-                .content_top()
-                .unwrap_or_else(|| self.viewport.get_untracked().0);
-            self.anchor.set(
-                self.messages
-                    .with_untracked(|messages| messages.anchor(top)),
-            );
-        }
+    // The list renders every resident message and leaves scroll anchoring to
+    // the browser (`overflow-anchor`), which keeps the message being read in
+    // place when content above it changes. The app adds three rules, applied
+    // synchronously from ResizeObservers so they land in the frame of the
+    // layout change: follow the live edge, keep the remembered row in place
+    // (browsers do not anchor at scroll offset 0, where older pages arrive),
+    // and center a jump target.
+    fn write_top(self, node: &web_sys::HtmlElement, top: f64) {
+        node.set_scroll_top(top.round() as i32);
+        self.programmatic_top.set(Some(node.scroll_top()));
     }
-    fn scroll(self) {
-        if self.searching.get_untracked() || self.layout_pending.get_untracked() {
-            return;
-        }
-        self.remember_anchor();
-        self.layout_pending.set(true);
-        leptos::task::spawn_local(async move {
-            // Let the reactive rows/spacers update, then correct before painting.
-            // A wall-clock delay paints the wrong window and can fight scrolling.
-            leptos::task::tick().await;
-            if !self.alive() {
-                return;
-            }
-            self.layout_pending.set(false);
-            if self.searching.get_untracked() {
-                return;
-            }
-            if let Some(node) = self.list.get_untracked() {
-                // Write the scroll position only when it must move. Rewriting an
-                // unchanged offset still cancels or clobbers an in-progress
-                // smooth wheel scroll, which pulled the view back while rows
-                // below it mounted and measured.
-                if self.bottom.get_untracked() {
-                    if node.scroll_height() - node.client_height() - node.scroll_top() > 1 {
-                        node.set_scroll_top(node.scroll_height());
-                        self.programmatic_top.set(Some(node.scroll_top()));
-                    }
-                } else {
-                    let position = self.anchor.get_untracked().and_then(|anchor| {
-                        self.messages.with_untracked(|m| {
-                            let anchor = m.normalize_anchor(anchor)?;
-                            Some((anchor, m.anchor_top(anchor)?))
-                        })
-                    });
-                    match (position, self.content_top()) {
-                        (Some((anchor, top)), Some(current)) => {
-                            self.anchor.set(Some(anchor));
-                            let delta = top - current;
-                            if delta.abs() >= 0.5 {
-                                node.set_scroll_top(
-                                    (f64::from(node.scroll_top()) + delta).round() as i32
-                                );
-                                self.programmatic_top.set(Some(node.scroll_top()));
-                            }
-                        }
-                        // User input superseded this correction, or its row was
-                        // evicted. Keep the current position rather than jumping to 0.
-                        _ => self.anchor.set(None),
-                    }
-                }
-                self.update_viewport();
-            }
-        });
+    fn row(self, id: &str) -> Option<web_sys::Element> {
+        self.rows
+            .get_untracked()?
+            .query_selector(&format!("li[data-message-id='{id}']"))
+            .ok()
+            .flatten()
     }
-    fn scrolled(self) {
-        if self.searching.get_untracked() {
-            return;
-        }
-        if let Some(node) = self.list.get_untracked() {
-            if self.programmatic_top.get_untracked() != Some(node.scroll_top()) {
-                // Process user scrolling even during a pending layout. Reset its
-                // old anchor before changing the virtual window or mounting rows.
-                self.programmatic_top.set(None);
-                self.anchor.set(None);
-                // Allow pixel rounding, but do not pull a deliberate small scroll
-                // back to the live edge when rows or the composer resize.
-                self.bottom
-                    .set(node.scroll_height() - node.scroll_top() - node.client_height() <= 2);
-                self.update_viewport();
-                self.read();
-            } else {
-                self.update_viewport();
-            }
-        }
-    }
-    /// The visible top edge in row coordinates (0 = first resident row). Uses
-    /// layout rectangles, so it is current even before the scroll event fires
-    /// and keeps the fractional offsets of non-integer display scaling, which
-    /// the integer `scrollTop` binding truncates.
-    fn content_top(self) -> Option<f64> {
+    /// The first row at least partly inside the visible list. Rows are in order,
+    /// so a binary search reads a handful of rectangles.
+    fn first_visible(self) -> Option<Keep> {
         let list = self.list.get_untracked()?;
-        let rows = self.rows.get_untracked()?;
-        Some(list.get_bounding_client_rect().top() - rows.get_bounding_client_rect().top())
+        let rows = self.rows.get_untracked()?.children();
+        let top = list.get_bounding_client_rect().top();
+        let (mut low, mut high) = (0, rows.length());
+        while low < high {
+            let middle = (low + high) / 2;
+            if rows.item(middle)?.get_bounding_client_rect().bottom() <= top {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let row = rows.item(low)?;
+        Some(Keep {
+            id: row.get_attribute("data-message-id")?,
+            offset: row.get_bounding_client_rect().top() - top,
+        })
     }
-    fn update_viewport(self) {
-        if self.searching.get_untracked() {
+    /// Remembers the row being read before content above it can change.
+    fn remember(self) {
+        if !self.bottom.get_untracked() && !self.searching.get_untracked() {
+            self.keep.set(self.first_visible());
+        }
+    }
+    fn settle(self) {
+        if !self.alive() || self.searching.get_untracked() {
             return;
         }
         let _timing = crate::performance::start(2);
-        if let (Some(node), Some(top)) = (self.list.get_untracked(), self.content_top()) {
-            let viewport = (top, f64::from(node.client_height()));
-            if self.viewport.get_untracked() != viewport {
-                self.viewport.set(viewport);
+        let Some(node) = self.list.get_untracked() else {
+            return;
+        };
+        let list_top = node.get_bounding_client_rect().top();
+        // A jump target that is not rendered yet (its page is loading) waits.
+        if let Some(id) = self.reveal.get_untracked()
+            && let Some(row) = self.row(&id.to_string())
+        {
+            self.reveal.set(None);
+            let rect = row.get_bounding_client_rect();
+            let centered = (f64::from(node.client_height()) - rect.height()).max(0.0) / 2.0;
+            self.write_top(
+                &node,
+                f64::from(node.scroll_top()) + rect.top() - list_top - centered,
+            );
+            return;
+        }
+        // Write only when the position must move: rewriting an unchanged
+        // offset cancels an in-progress smooth wheel scroll.
+        if self.bottom.get_untracked() {
+            if node.scroll_height() - node.client_height() - node.scroll_top() > 1 {
+                self.write_top(&node, f64::from(node.scroll_height()));
             }
+        } else if let Some(keep) = self.keep.get_untracked()
+            && let Some(row) = self.row(&keep.id)
+        {
+            let delta = row.get_bounding_client_rect().top() - list_top - keep.offset;
+            if delta.abs() >= 0.5 {
+                self.write_top(&node, f64::from(node.scroll_top()) + delta);
+            }
+        }
+    }
+    fn scrolled(self) {
+        self.scrolls.update(|n| *n += 1);
+        if self.searching.get_untracked() {
+            return;
+        }
+        if let Some(node) = self.list.get_untracked()
+            && self.programmatic_top.get_untracked() != Some(node.scroll_top())
+        {
+            // The user scrolled: the browser anchors from here.
+            self.programmatic_top.set(None);
+            self.keep.set(None);
+            self.reveal.set(None);
+            // Allow pixel rounding, but do not pull a deliberate small scroll
+            // back to the live edge when rows or the composer resize.
+            self.bottom
+                .set(node.scroll_height() - node.scroll_top() - node.client_height() <= 2);
+            self.read();
         }
     }
     fn merge_batch(self, messages: Vec<ChatMessage>, mode: Merge) {
@@ -267,9 +264,9 @@ impl Chat {
                 })
             })
             .expect("live chat state");
-        // Capture the visual anchor before changing heights/order. All work in a
-        // history page shares one cache mutation and one deferred scroll pass.
-        self.scroll();
+        // Remember the row being read before rows are inserted above it. The
+        // rows' ResizeObserver then corrects the position in the same frame.
+        self.remember();
         for message in &messages {
             if message.deleted {
                 if self.reply_to.get_untracked() == Some(message.id) {
@@ -351,7 +348,8 @@ impl Chat {
         self.history_loading.set(false);
         self.ready.set(false);
         self.messages.set(MessageCache::default());
-        self.anchor.set(None);
+        self.keep.set(None);
+        self.reveal.set(None);
     }
     fn latest(self) {
         if self.history_loading.get_untracked() {
@@ -368,7 +366,8 @@ impl Chat {
             self.refresh.update(|generation| *generation += 1);
             self.status.set("Loading latest messages…".into());
         }
-        self.scroll();
+        self.keep.set(None);
+        self.settle();
         self.read();
     }
     /// Escape: jump to the live edge and acknowledge it, like the button.
@@ -885,7 +884,6 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
             chat.mark_first_unread();
             chat.load_pins();
             chat.status.set("Connected".into());
-            chat.scroll();
             chat.read();
         }
         ServerEvent::Message { message, .. } => {
@@ -929,37 +927,6 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum SpacerEdge {
-    Before,
-    After,
-}
-
-/// One entry of the virtual message list: a mounted row, or the spacer that
-/// stands in for the unmounted rows above or below the window.
-#[derive(Clone)]
-enum Slot {
-    Spacer(SpacerEdge, f64),
-    Row(u64, MessageId, ArcRwSignal<ChatMessage>),
-}
-
-#[derive(PartialEq, Eq, Hash)]
-enum SlotKey {
-    /// A new height is a new key: the list replaces the spacer in the same
-    /// update that mounts or unmounts the rows it accounts for.
-    Spacer(SpacerEdge, u64),
-    Row(u64, MessageId),
-}
-
-impl Slot {
-    fn key(&self) -> SlotKey {
-        match self {
-            Self::Spacer(edge, height) => SlotKey::Spacer(*edge, height.to_bits()),
-            Self::Row(generation, id, _) => SlotKey::Row(*generation, *id),
-        }
-    }
-}
-
 /// Observers and callbacks are disposed with the keyed row/effect that owns them.
 fn observe_size(element: &web_sys::Element, callback: impl FnMut() + 'static) {
     let callback = Closure::<dyn FnMut()>::new(callback);
@@ -978,33 +945,11 @@ fn MessageRow(
     composer: Composer,
 ) -> impl IntoView {
     // This arena handle belongs to the keyed row, not the chat panel. The cache
-    // retains only the Arc; evicted rows release both state and measurements.
+    // retains only the Arc; evicted rows release their state.
     let message = RwSignal::from(message);
-    let row = NodeRef::<leptos::html::Li>::new();
-    Effect::new(move |_| {
-        if let Some(node) = row.get() {
-            observe_size(node.unchecked_ref(), move || {
-                if !chat.alive() || chat.searching.get_untracked() {
-                    return;
-                }
-                let Some(node) = row.get_untracked() else {
-                    return;
-                };
-                chat.remember_anchor();
-                let _timing = crate::performance::start(2);
-                let changed = chat
-                    .messages
-                    .update_untracked(|m| m.measure(id, node.get_bounding_client_rect().height()));
-                if changed {
-                    chat.scroll();
-                    chat.messages.notify();
-                }
-            });
-        }
-    });
     let divider = move || chat.first_unread.get() == Some(id);
     // Follow-ups from the same author share the previous row's header. The
-    // cache lookup is O(log n) and only runs for the mounted window.
+    // cache lookup is O(log n).
     let grouped = Memo::new(move |_| {
         if divider() || message.with(|m| m.reply.is_some()) {
             return false;
@@ -1047,7 +992,7 @@ fn MessageRow(
     let color =
         move || identity.with(|i| i.as_ref().and_then(|i| super::members::name_color(i.color)));
     view! {
-        <li node_ref=row class="message-row" class:message-grouped=move || grouped.get() data-message-id=id.to_string()>
+        <li class="message-row" class:message-grouped=move || grouped.get() data-message-id=id.to_string()>
             <Show when=divider>
                 <div class="unread-divider" role="separator"><span>{move || crate::i18n::t("New messages")}</span></div>
             </Show>
@@ -1166,10 +1111,10 @@ pub(super) fn ChatPanel(
         permissions: RwSignal::new(Permissions::new()),
         list: NodeRef::new(),
         rows: NodeRef::new(),
-        viewport: RwSignal::new((0.0, 800.0)),
-        layout_pending: RwSignal::new(false),
         programmatic_top: RwSignal::new(None),
-        anchor: RwSignal::new(None),
+        keep: RwSignal::new(None),
+        reveal: RwSignal::new(None),
+        scrolls: RwSignal::new(0),
         refresh: RwSignal::new(0),
         history_generation: RwSignal::new(0),
         history_loading: RwSignal::new(false),
@@ -1192,10 +1137,18 @@ pub(super) fn ChatPanel(
             chat.unread_on_open.set(count);
         }
     });
-    Effect::new(move |_| {
-        if !search.active.get() {
-            chat.scroll();
+    Effect::new(move |was_searching: Option<bool>| {
+        let searching = search.active.get();
+        if searching && was_searching == Some(false) {
+            // `searching` is already set, so remember the row directly.
+            if !chat.bottom.get_untracked() {
+                chat.keep.set(chat.first_visible());
+            }
+        } else if !searching && was_searching == Some(true) {
+            // Settle once the list is displayed again.
+            request_animation_frame(move || chat.settle());
         }
+        searching
     });
     let editing = RwSignal::new(None::<MessageId>);
     let draft = super::draft_signal(ui, super::Draft::Channel(channel), move || {
@@ -1217,19 +1170,14 @@ pub(super) fn ChatPanel(
         attachments::clear_downloads(chat);
         chat.attachment_generation.update(|g| *g += 1);
     });
-    let visible = Memo::new(move |_| {
-        let (top, height) = chat.viewport.get();
-        chat.messages.with(|m| m.window(top, height))
-    });
     Effect::new(move |_| {
         if let Some(node) = chat.list.get() {
-            observe_size(node.unchecked_ref(), move || {
-                if chat.alive() {
-                    chat.scroll();
-                    chat.update_viewport();
-                }
-            });
-            chat.update_viewport();
+            observe_size(node.unchecked_ref(), move || chat.settle());
+        }
+    });
+    Effect::new(move |_| {
+        if let Some(node) = chat.rows.get() {
+            observe_size(node.unchecked_ref(), move || chat.settle());
         }
     });
     ui.active_chat.set(Some(chat));
@@ -1474,7 +1422,7 @@ pub(super) fn ChatPanel(
             // The jump button overlays the list: toggling it must not resize the
             // scroller, or reaching the live edge would shift the content.
             <div class="relative flex min-h-0 flex-1 flex-col" style:display=move ||if search.active.get(){"none"}else{""}>
-            <div node_ref=chat.list role="region" tabindex="0" aria-label=move || crate::i18n::t("Messages") class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4 [overflow-anchor:none]"
+            <div node_ref=chat.list role="region" tabindex="0" aria-label=move || crate::i18n::t("Messages") class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4"
                 style:padding-bottom=move || chat.messages.with(|m| m.newer).then_some("3.5rem") on:scroll=move |_|chat.scrolled()>
                 <div class="h-10">
                     <Show when=move || chat.messages.with(|m| m.older.is_some())>
@@ -1482,28 +1430,15 @@ pub(super) fn ChatPanel(
                             on:click=move |_| chat.load_older()>{move || crate::i18n::t("Load older messages")}</button>
                     </Show>
                 </div>
+                // Every resident message (at most `RESIDENT_LIMIT`) is rendered.
                 <ul node_ref=chat.rows aria-label=move || crate::i18n::t("Message history")>
-                    // The spacers are entries of the same keyed list as the rows
-                    // (keyed by height), so one diff swaps a row for spacer height.
-                    // Separate spacer effects could land a frame later: the list
-                    // briefly lost a row's height, and near the bottom the browser
-                    // clamped the scroll position back up on every wheel step.
                     <For
                         each=move || {
                             let generation = chat.history_generation.get();
-                            visible.with(|w| chat.messages.with_untracked(|cache| {
-                                let mut slots = Vec::with_capacity(w.ids.len() + 2);
-                                slots.push(Slot::Spacer(SpacerEdge::Before, w.before));
-                                slots.extend(w.ids.iter().filter_map(|id| cache.get(*id).map(|row| Slot::Row(generation, *id, row.clone()))));
-                                slots.push(Slot::Spacer(SpacerEdge::After, w.after));
-                                slots
-                            }))
+                            chat.messages.with(|cache| cache.ordered().map(|(id, row)| (generation, id, row.clone())).collect::<Vec<_>>())
                         }
-                        key=Slot::key
-                        children=move |slot| match slot {
-                            Slot::Spacer(_, height) => view! { <li aria-hidden="true" style:height=format!("{height}px")></li> }.into_any(),
-                            Slot::Row(_, id, message) => view! { <MessageRow chat id message composer/> }.into_any(),
-                        }
+                        key=|(generation, id, _)| (*generation, *id)
+                        children=move |(_, id, message)| view! { <MessageRow chat id message composer/> }
                     />
                 </ul>
                 <ul class="mt-4 space-y-3">

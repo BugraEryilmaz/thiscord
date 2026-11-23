@@ -837,14 +837,45 @@ pub(super) fn Card(
             .await;
         });
     };
-    // Only mounted media rows fetch. Generic files never fetch without a click.
+    // Media previews fetch once they come within 800 px of the visible list, so
+    // opening or paging back through history does not download every image.
+    // Generic files never fetch without a click.
+    let card = NodeRef::<leptos::html::Div>::new();
     if kind != PreviewKind::File {
-        fetch(false);
+        Effect::new(move |_| {
+            let (Some(node), Some(root)) = (card.get(), chat.list.get()) else {
+                return;
+            };
+            let near = Closure::<dyn FnMut(js_sys::Array, web_sys::IntersectionObserver)>::new(
+                move |entries: js_sys::Array, observer: web_sys::IntersectionObserver| {
+                    let visible = entries.iter().any(|entry| {
+                        entry
+                            .unchecked_into::<web_sys::IntersectionObserverEntry>()
+                            .is_intersecting()
+                    });
+                    if visible {
+                        observer.disconnect();
+                        fetch(false);
+                    }
+                },
+            );
+            let options = web_sys::IntersectionObserverInit::new();
+            options.set_root(Some(&root));
+            options.set_root_margin("800px 0px");
+            if let Ok(observer) = web_sys::IntersectionObserver::new_with_options(
+                near.as_ref().unchecked_ref(),
+                &options,
+            ) {
+                observer.observe(&node);
+                let kept = StoredValue::new_local((observer, near));
+                on_cleanup(move || kept.with_value(|(observer, _)| observer.disconnect()));
+            }
+        });
     }
     view! {
         // The cover takes the card's width (see `.spoiler-cover-card`).
         <super::super::message_content::SpoilerCover spoiler class="spoiler-cover-card">
-        <div class="my-2 max-w-sm space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
+        <div node_ref=card class="my-2 max-w-sm space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
             // Media reserves its final box while loading (and before the image
             // decodes), so mounting a row does not change its measured height.
             <Show when=move || kind != PreviewKind::File && (url.get().is_some() || error.with(String::is_empty))>

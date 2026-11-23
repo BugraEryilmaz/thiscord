@@ -51,32 +51,31 @@ history preserves scroll position; incoming messages follow while at the bottom
 (with two pixels of rounding tolerance). Scrolling upward pauses following until
 you return to the bottom or choose Jump to latest.
 The open channel retains at most 500 server messages in an ID-indexed, ordered
-cache. The list renders keyed reactive rows for the viewport plus 400 pixels of
-overscan on each side. Row heights are measured for wrapping, edits and resizing;
-spacers represent unmounted rows, and history prepends preserve a message anchor.
-Pages merge once and share scroll work after reactive DOM updates. User scrolling
-supersedes a pending correction, and unchanged row measurements do not schedule
-another one. Measured anchors are normalized to the row actually on screen so
-later edits/resizing cannot restore an outdated estimated position. Anchors use
-the live layout position rather than the last scroll event, and corrections write
-the scroll offset only when it must move, so they do not interrupt wheel scrolling.
+cache, and the list renders all of them as keyed reactive rows. It is not
+virtualized. A virtual window (spacers, height estimates, measured rows and
+custom anchors) was removed after repeated scroll bugs. In the desktop WebView
+with 500 resident messages, a full list scrolled as smoothly as the window
+(p95 frame 10 ms either way), at a memory cost (about 29,000 DOM nodes and
+58 MB WASM memory versus 1,200 and 15–23 MB) that only paging back nine times
+reaches. Scroll anchoring is the browser's (`overflow-anchor`): the message being
+read stays in place when content above it changes. The app adds three rules,
+applied synchronously from ResizeObservers on the list and its rows, so they
+land in the same frame as the layout change: follow the live edge while at the
+bottom, keep the row being read in place when older pages arrive (browsers do
+not anchor at scroll offset 0, exactly where the history button sits), and
+center a jump target. They write the scroll offset only when it must move, so
+they do not interrupt wheel scrolling. Image and video previews fetch when they
+come within 800 pixels of the visible list.
 Image and video previews reserve their box while they load, so rows keep their
-height when they mount and remount. The server reads each PNG, JPEG, GIF and WebP
+height when they first render. The server reads each PNG, JPEG, GIF and WebP
 upload's displayed size from its header (EXIF orientation applied, pixels never
 decoded) and sends it with the attachment, so even an image's first preview gets
 its exact box. Files stored before sizes were recorded are measured once by a
 background backfill after startup, which also adds the size to their messages.
 Without a size, the client uses the ratio it measured when the image last loaded,
-or a 16:9 placeholder.
-Anchors can only compensate for rows above the viewport: a row that changes height
-while it is on screen moves the content below it. Anything wrapping row content,
-such as the spoiler cover, must keep the reserved box. A shrink-to-fit wrapper
-collapses it until the media decodes, so chat cards give their cover the card's
-width.
-Spacers are entries of the same keyed list as the rows, keyed by their height, so
-one list update swaps a row for spacer height. As separate reactive updates they
-could reach the screen a frame apart; for that frame the list was a row shorter,
-and near the bottom the browser clamped the scroll position back up on every step.
+or a 16:9 placeholder. A row that changes height while on screen moves the
+content below it, so anything wrapping row content, such as the spoiler cover,
+must keep the reserved box: chat cards give their cover the card's width.
 Jump to latest overlays the list instead of resizing it.
 Edits update existing row state.
 Following live chat evicts the oldest rows and preserves a cursor to reload them.
@@ -590,7 +589,7 @@ Guild message rows provide Reply, emoji reactions, and Pin/Unpin for moderators.
 Replies reference an existing undeleted message in the same channel. They require
 ReadHistory as well as SendMessages. The 160-character preview is read from the
 current target; deleted targets expose no content. Clicking a preview loads a
-bounded context window and highlights the original within the virtual list.
+bounded context window and highlights the original, centered in the list.
 Each preview carries the target's `target_revision`, independently of the reply's
 own revision. Clients compare these revisions across HTTP and socket snapshots,
 including when the target is outside retained history. Missing legacy revisions
