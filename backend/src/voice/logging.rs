@@ -91,6 +91,10 @@ impl Socket {
     pub fn end(&mut self, reason: &'static str) {
         self.reason.get_or_insert(reason);
     }
+    /// For a cause established after a symptom was already recorded.
+    pub fn replace_end(&mut self, reason: &'static str) {
+        self.reason = Some(reason);
+    }
     pub fn silent_for(&self) -> Duration {
         self.last_received.unwrap_or(self.started).elapsed()
     }

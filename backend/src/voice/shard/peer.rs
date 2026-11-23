@@ -1,6 +1,6 @@
 //! One connection's sans-I/O core and the per-connection state that the webrtc
 //! mode keeps in `Handler`, its track reader tasks and its egress writers.
-use super::{forward::Egress, *};
+use super::{super::refusal, forward::Egress, *};
 use rtc::{
     ice::{candidate::CandidateConfig, mdns::MulticastDnsMode},
     peer_connection::{
@@ -215,7 +215,9 @@ impl Connection {
             .find(|coding| coding.rtp_coding_parameters.ssrc == Some(init.ssrc))
             .map(|coding| coding.codec.clone())
         else {
-            self.context.active.store(false, Ordering::Release);
+            self.context
+                .refusal
+                .refuse(&self.context.active, refusal::Reason::UnexpectedTrack);
             return;
         };
         let ssrc = init.ssrc;
@@ -241,7 +243,9 @@ impl Connection {
         } else {
             MediaKind::from_publisher_ssrc(ssrc)
         }) else {
-            self.context.active.store(false, Ordering::Release);
+            self.context
+                .refusal
+                .refuse(&self.context.active, refusal::Reason::UnexpectedTrack);
             return;
         };
         let mime = if kind.is_video() {
@@ -259,7 +263,9 @@ impl Connection {
             || codec.clock_rate != kind.clock_rate()
             || std::mem::replace(seen, true)
         {
-            self.context.active.store(false, Ordering::Release);
+            self.context
+                .refusal
+                .refuse(&self.context.active, refusal::Reason::UnexpectedTrack);
             return;
         }
         if browser && kind.is_video() {
@@ -293,7 +299,9 @@ impl Connection {
             }
             let kind = track.kind;
             if kind == MediaKind::ScreenVideo && !self.screen_rate.admit(packet.payload.len()) {
-                self.context.active.store(false, Ordering::Release);
+                self.context
+                    .refusal
+                    .refuse(&self.context.active, refusal::Reason::MediaRate);
                 continue;
             }
             if track.since.elapsed() > Duration::from_secs(1) {
@@ -303,21 +311,10 @@ impl Connection {
             }
             track.count += 1;
             track.bytes += packet.payload.len();
-            if track.count
-                > (if kind.is_video() {
-                    thiscord_shared::screen::MAX_PACKETS_PER_SECOND
-                } else {
-                    100
-                })
-                || packet.payload.len() > 1500
-                || track.bytes
-                    > if kind.is_video() {
-                        thiscord_shared::screen::MAX_BYTES_PER_SECOND
-                    } else {
-                        150_000
-                    }
+            if let Some(reason) =
+                refusal::ingress_limit(kind, track.count, track.bytes, packet.payload.len())
             {
-                self.context.active.store(false, Ordering::Release);
+                self.context.refusal.refuse(&self.context.active, reason);
                 continue;
             }
             if kind.is_video() {

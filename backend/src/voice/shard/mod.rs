@@ -140,6 +140,8 @@ pub(super) struct PeerContext {
     pub access: Arc<access::Access>,
     pub generation: Arc<AtomicU64>,
     pub active: Arc<AtomicBool>,
+    /// Set with the reason whenever ingress inspection clears `active`.
+    pub refusal: Arc<super::refusal::Refusal>,
     pub metrics: Arc<[AtomicU64; 5]>,
 }
 

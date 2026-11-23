@@ -33,7 +33,9 @@ whole batch with one `sendmmsg`.
   views, byte budgets, keyframe requests, rosters, resumption, restart drains,
   in-place ICE restarts and authorization rechecks ([restarts.md](restarts.md)).
 - Track classification and ingress limits: `shard/peer.rs` `open_track`/`media` follow
-  `Handler::on_track` and its reader task line by line.
+  `Handler::on_track` and its reader task line by line. Both share
+  `refusal::ingress_limit` and record why they stopped media in `refusal::Refusal`,
+  which the signaling owner logs and reports to the client.
 - Forwarding: `shard/forward.rs` runs the relay loop's checks and header rewrite, admits
   each delivery with the same `egress::Sender::admit`, then runs `egress::Writer::run`'s
   per-packet steps (RED floors, sequence/timestamp continuity, screen sequence windows,

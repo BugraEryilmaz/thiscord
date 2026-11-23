@@ -43,6 +43,50 @@ impl EncodedFrame {
     }
 }
 
+/// Microphone packets admitted per second. A real-time sender uses 50; the
+/// server refuses a track above 100 within one rate window. Capacity plus one
+/// second of refill stays well under that limit.
+pub const PACE_PER_SECOND: f64 = 60.0;
+const PACE_BURST: f64 = 10.0;
+
+/// Caps outgoing microphone packets so a capture clock running fast (which
+/// device health reports separately) cannot get the call refused meanwhile.
+/// Normal catch-up bursts are bounded by the queue and packet age and fit.
+pub struct Pace {
+    tokens: f64,
+    last: Option<Instant>,
+    paced: u64,
+}
+impl Default for Pace {
+    fn default() -> Self {
+        Self {
+            tokens: PACE_BURST,
+            last: None,
+            paced: 0,
+        }
+    }
+}
+impl Pace {
+    pub fn admit(&mut self, now: Instant) -> bool {
+        if let Some(last) = self.last {
+            let refill = now.saturating_duration_since(last).as_secs_f64() * PACE_PER_SECOND;
+            self.tokens = (self.tokens + refill).min(PACE_BURST);
+        }
+        self.last = Some(now);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            self.paced += 1;
+            false
+        }
+    }
+    /// Packets withheld so far.
+    pub fn paced(&self) -> u64 {
+        self.paced
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropReason {
     QueueFull,
@@ -342,6 +386,39 @@ impl RtpClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pace_admits_real_time_and_bounds_a_fast_capture_clock() {
+        let start = Instant::now();
+        let mut pace = Pace::default();
+        // 50 packets/s with a five-packet catch-up after a 100 ms stall.
+        let mut at = start;
+        for i in 0..500 {
+            at += Duration::from_millis(if i % 50 == 0 { 0 } else { 20 });
+            assert!(pace.admit(at), "real-time packet {i} must be sent");
+        }
+        assert_eq!(pace.paced(), 0);
+
+        // About 4.6x real time: 230 packets/s for three seconds.
+        let mut pace = Pace::default();
+        let interval = Duration::from_micros(1_000_000 / 230);
+        let mut sent = Vec::new();
+        for i in 0..690 {
+            let at = start + interval * i;
+            if pace.admit(at) {
+                sent.push(at);
+            }
+        }
+        // No one-second window reaches the server's limit of 100 packets.
+        for (i, first) in sent.iter().enumerate() {
+            let within = sent[i..]
+                .iter()
+                .take_while(|at| at.duration_since(*first) <= Duration::from_secs(1))
+                .count();
+            assert!(within <= 72, "{within} packets within one second");
+        }
+        assert!(pace.paced() > 400);
+    }
 
     #[test]
     fn moderation_blocks_fresh_capture_and_rejects_backlog_after_release() {
