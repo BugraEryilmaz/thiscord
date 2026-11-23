@@ -11,6 +11,7 @@ mod layers;
 mod logging;
 mod membership;
 mod red;
+mod refusal;
 mod resumption;
 mod retransmission;
 mod shard;
@@ -168,9 +169,16 @@ struct VoiceAccess {
     voice_revision: i64,
     generation: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
+    refusal: Arc<refusal::Refusal>,
 }
 impl VoiceAccess {
     async fn failed(&self, socket: &mut logging::Socket, id: RequestId, error: Failure) {
+        // Refused media also fails the recheck (`active` is false); access did
+        // not change. The loop's tail reports the refusal instead of Revoked.
+        if self.refusal.reason().is_some() {
+            socket.end("media_refused");
+            return;
+        }
         let pool = self.pool.clone();
         let token = self.token.clone();
         let (guild, channel, revision) = (self.guild, self.channel, self.voice_revision);
@@ -498,6 +506,7 @@ struct Handler {
     packets: mpsc::Sender<Ingress>,
     media_packets: mpsc::Sender<Ingress>,
     active: Arc<AtomicBool>,
+    refusal: Arc<refusal::Refusal>,
     generation: Arc<AtomicU64>,
     track_seen: [AtomicBool; 5],
     screen_rate: Arc<std::sync::Mutex<layers::IngressBudget>>,
@@ -524,7 +533,8 @@ impl PeerConnectionEventHandler for Handler {
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         let Some(ssrc) = track.ssrcs().await.first().copied() else {
-            self.active.store(false, Ordering::Release);
+            self.refusal
+                .refuse(&self.active, refusal::Reason::UnexpectedTrack);
             return;
         };
         let Some(codec) = track.codec(ssrc).await else {
@@ -554,7 +564,8 @@ impl PeerConnectionEventHandler for Handler {
         } else {
             MediaKind::from_publisher_ssrc(ssrc)
         }) else {
-            self.active.store(false, Ordering::Release);
+            self.refusal
+                .refuse(&self.active, refusal::Reason::UnexpectedTrack);
             return;
         };
         let mime = if kind.is_video() {
@@ -572,7 +583,8 @@ impl PeerConnectionEventHandler for Handler {
             || self.track_seen[if low_layer { 4 } else { kind as usize }]
                 .swap(true, Ordering::AcqRel)
         {
-            self.active.store(false, Ordering::Release);
+            self.refusal
+                .refuse(&self.active, refusal::Reason::UnexpectedTrack);
             return;
         }
         if browser {
@@ -585,6 +597,7 @@ impl PeerConnectionEventHandler for Handler {
         };
         let metrics = self.metrics.clone();
         let active = self.active.clone();
+        let refusal = self.refusal.clone();
         let generation = self.generation.clone();
         let screen_rate = self.screen_rate.clone();
         tokio::spawn(async move {
@@ -602,7 +615,7 @@ impl PeerConnectionEventHandler for Handler {
                     if kind == MediaKind::ScreenVideo
                         && !screen_rate.lock().unwrap().admit(packet.payload.len())
                     {
-                        active.store(false, Ordering::Release);
+                        refusal.refuse(&active, refusal::Reason::MediaRate);
                         break;
                     }
                     if since.elapsed() > Duration::from_secs(1) {
@@ -612,21 +625,10 @@ impl PeerConnectionEventHandler for Handler {
                     }
                     count += 1;
                     bytes += packet.payload.len();
-                    if count
-                        > (if kind.is_video() {
-                            thiscord_shared::screen::MAX_PACKETS_PER_SECOND
-                        } else {
-                            100
-                        })
-                        || packet.payload.len() > 1500
-                        || bytes
-                            > if kind.is_video() {
-                                thiscord_shared::screen::MAX_BYTES_PER_SECOND
-                            } else {
-                                150_000
-                            }
+                    if let Some(reason) =
+                        refusal::ingress_limit(kind, count, bytes, packet.payload.len())
                     {
-                        active.store(false, Ordering::Release);
+                        refusal.refuse(&active, reason);
                         break;
                     }
                     if kind.is_video() {
@@ -1299,6 +1301,7 @@ async fn serve(
     };
     let room = room(guild_id, channel_id).await;
     let active = Arc::new(AtomicBool::new(true));
+    let refusal = Arc::new(refusal::Refusal::default());
     let (out_tx, out_rx) = egress::channel(MediaKind::Microphone);
     let (video_tx, video_rx) = egress::channel(MediaKind::ScreenVideo);
     let (audio_tx, audio_rx) = egress::channel(MediaKind::SystemAudio);
@@ -1393,6 +1396,7 @@ async fn serve(
                     packets: in_tx,
                     media_packets: media_in_tx,
                     active: active.clone(),
+                    refusal: refusal.clone(),
                     generation: generation.clone(),
                     track_seen: std::array::from_fn(|_| AtomicBool::new(false)),
                     screen_rate: Default::default(),
@@ -1415,6 +1419,7 @@ async fn serve(
                 access: connection_access.clone(),
                 generation: generation.clone(),
                 active: active.clone(),
+                refusal: refusal.clone(),
                 metrics: metrics.clone(),
             },
         )
@@ -1820,6 +1825,7 @@ async fn serve(
             voice_revision,
             generation,
             active: active.clone(),
+            refusal: refusal.clone(),
         };
         let (_audio_registration, mut audio_requests) = if remote_audio {
             let (guard, receiver) =
@@ -2098,6 +2104,16 @@ async fn serve(
                 }
             }
         }
+        if let Some(reason) = refusal.reason() {
+            // Whichever check noticed the cleared `active` first ended the loop;
+            // name the actual cause. A final error also stops the client from
+            // resuming a session that no longer exists.
+            socket.replace_end("media_refused");
+            tracing::warn!(request_id = %id, reason = reason.code(), "voice media refused");
+            if !*replaced.borrow() && !restarting {
+                refused_close(&mut socket, id, reason).await;
+            }
+        }
         active.store(false, Ordering::Release);
         if let Some(relay) = &relay {
             relay.abort();
@@ -2238,6 +2254,25 @@ async fn restarting_close(socket: &mut logging::Socket, id: RequestId, notice: b
     .await;
 }
 
+/// The error names the cause; the policy close keeps clients from treating the
+/// end of signaling as a drop to resume.
+async fn refused_close(socket: &mut logging::Socket, id: RequestId, reason: refusal::Reason) {
+    let _ = send(
+        socket,
+        ServerEvent::Error {
+            error: reason.error(id),
+        },
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: axum::extract::ws::close_code::POLICY,
+            reason: "Voice media refused".into(),
+        }))),
+    )
+    .await;
+}
 async fn replaced_close(socket: &mut logging::Socket) {
     socket.end("replaced");
     let _ = send(socket, ServerEvent::Replaced {}).await;
@@ -2342,6 +2377,7 @@ mod send_tests {
             voice_revision: 0,
             generation: Arc::new(AtomicU64::new(0)),
             active: Arc::new(AtomicBool::new(true)),
+            refusal: Default::default(),
         };
         assert_eq!(access.current_roster(&room).await, Some(vec![]));
         assert_eq!(access.pool.state().connections, 0);

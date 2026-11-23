@@ -163,6 +163,7 @@ where
     f32: cpal::FromSample<T>,
 {
     let channels = config.channels as usize;
+    health.input_rate(config.sample_rate);
     let activity = health.clone();
     let mut capture_clock = frames::CaptureClock::default();
     let mut converter =
@@ -175,6 +176,7 @@ where
                     return;
                 }
                 activity.callback(true);
+                activity.captured(data.len() / channels);
                 let capture_at = capture_clock.map(Instant::now(), info.timestamp());
                 if let Some(converter) = &mut converter {
                     writer.begin_capture(converter.capture_time(capture_at, data.len() / channels));

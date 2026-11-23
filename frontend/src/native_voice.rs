@@ -1222,6 +1222,7 @@ async fn run(
     let mut red_sender = thiscord_frontend::audio::red::Sender::default();
     let mut accepted_packets = 0_u64;
     let mut accepted_bytes = 0_u64;
+    let mut pace = thiscord_frontend::audio::outgoing::Pace::default();
     let mut last_audio_stats = Instant::now();
     let mut remote_jobs = tokio::task::JoinSet::new();
     let mut remote_reply: Option<(
@@ -1332,6 +1333,16 @@ async fn run(
                     }
                 }
                 if !red_sender.within_budget(&frame) {
+                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
+                    continue;
+                }
+                // A capture clock running fast must not get the call refused
+                // while device health reopens the microphone.
+                if !pace.admit(now) {
+                    if pace.paced() == 1 {
+                        attempt.connection.event("voice_microphone_paced", serde_json::json!({"accepted_packets":accepted_packets}));
+                    }
+                    red_sender.clear();
                     frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
                     continue;
                 }
@@ -1543,7 +1554,7 @@ async fn run(
                 if last_audio_stats.elapsed() >= Duration::from_secs(5) {
                     attempt.connection.event("voice_transmit", serde_json::json!({
                         "accepted_packets":accepted_packets,"accepted_payload_bytes":accepted_bytes,
-                        "minimum_rtp_header_bytes":accepted_packets*12
+                        "minimum_rtp_header_bytes":accepted_packets*12,"paced_packets":pace.paced()
                     }));
                     last_audio_stats = Instant::now();
                 }

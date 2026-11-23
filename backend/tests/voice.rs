@@ -29,6 +29,8 @@ mod moderation;
 mod recovery;
 #[path = "voice/red.rs"]
 mod red;
+#[path = "voice/refusal.rs"]
+mod refusal;
 #[path = "voice/restart.rs"]
 mod restart;
 #[path = "voice/roster.rs"]

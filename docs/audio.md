@@ -367,6 +367,12 @@ bounded recovery and identify the microphone/output stream and CPAL error catego
 Route changes also use recovery instead of accepting an implicit backend reroute.
 Callbacks record atomic failure/activity counters; error formatting stays off the
 callbacks. Five seconds without expected input/output callbacks also enters recovery.
+So does a microphone delivering more than 1.5x real time (plus 250 ms of catch-up)
+over a window of at least one second: a stuck Windows audio engine was seen
+capturing at about 4.6x, which encoded about 230 packets/second. Independently, the
+send loop paces microphone packets to 60/second with a burst of 10, so no
+one-second window approaches the server's ingress limit while recovery runs; paced
+packets are counted in the `voice_transmit` diagnostic.
 
 ## Worker resilience and diagnostic logs
 
@@ -1357,7 +1363,10 @@ Room membership is in memory. There are eight users per room, 64 active/pending
 voice sockets per process, six joins per account/minute, a five-second initial
 authentication deadline and bounded negotiation. Signaling is capped at 128 KiB
 and 30 incoming frames/second. Publisher ingress is capped at 100 packets/second
-and 1500 bytes/packet. Independent outgoing microphone, video and shared-audio
+and 1500 bytes/packet. Exceeding a limit, or sending a track the offer did not
+negotiate, ends the connection with a final `Error` naming the cause (and a
+`voice media refused` log with its reason), rather than an access revocation or a
+silent close that the client would try to resume. Independent outgoing microphone, video and shared-audio
 writers isolate application backpressure. Audio queues have 32 packet slots,
 32 KiB byte budgets (including in-flight writes) and 100 ms enqueue-to-write
 deadlines. Expired microphone packets are dropped, including expiry while waiting
