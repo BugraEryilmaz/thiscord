@@ -2111,13 +2111,7 @@ async fn serve(
             socket.replace_end("media_refused");
             tracing::warn!(request_id = %id, reason = reason.code(), "voice media refused");
             if !*replaced.borrow() && !restarting {
-                let _ = send(
-                    &mut socket,
-                    ServerEvent::Error {
-                        error: reason.error(id),
-                    },
-                )
-                .await;
+                refused_close(&mut socket, id, reason).await;
             }
         }
         active.store(false, Ordering::Release);
@@ -2260,6 +2254,25 @@ async fn restarting_close(socket: &mut logging::Socket, id: RequestId, notice: b
     .await;
 }
 
+/// The error names the cause; the policy close keeps clients from treating the
+/// end of signaling as a drop to resume.
+async fn refused_close(socket: &mut logging::Socket, id: RequestId, reason: refusal::Reason) {
+    let _ = send(
+        socket,
+        ServerEvent::Error {
+            error: reason.error(id),
+        },
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: axum::extract::ws::close_code::POLICY,
+            reason: "Voice media refused".into(),
+        }))),
+    )
+    .await;
+}
 async fn replaced_close(socket: &mut logging::Socket) {
     socket.end("replaced");
     let _ = send(socket, ServerEvent::Replaced {}).await;

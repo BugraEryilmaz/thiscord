@@ -391,11 +391,15 @@ mod tests {
     fn pace_admits_real_time_and_bounds_a_fast_capture_clock() {
         let start = Instant::now();
         let mut pace = Pace::default();
-        // 50 packets/s with a five-packet catch-up after a 100 ms stall.
+        // 50 packets/s, then five packets at once after a 100 ms stall.
         let mut at = start;
         for i in 0..500 {
-            at += Duration::from_millis(if i % 50 == 0 { 0 } else { 20 });
+            at += Duration::from_millis(20);
             assert!(pace.admit(at), "real-time packet {i} must be sent");
+        }
+        at += Duration::from_millis(100);
+        for i in 0..5 {
+            assert!(pace.admit(at), "catch-up packet {i} must be sent");
         }
         assert_eq!(pace.paced(), 0);
 

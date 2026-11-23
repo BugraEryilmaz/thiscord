@@ -737,6 +737,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_media_error_is_final_and_never_resumed() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut socket = accept(&listener).await;
+            reply(
+                &mut socket,
+                ServerEvent::Error {
+                    error: thiscord_shared::ApiError {
+                        code: thiscord_shared::ErrorCode::BadRequest,
+                        message: "Voice stopped because your microphone sent audio faster than real time. Check or change your microphone, then join again.".into(),
+                        request_id: "00000000-0000-0000-0000-000000000003".parse().unwrap(),
+                        fields: vec![],
+                    },
+                },
+            )
+            .await;
+            socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: "Voice media refused".into(),
+                })))
+                .await
+                .unwrap();
+            // A resume attempt would arrive here.
+            timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .is_err()
+        });
+        let (send, receive) = connect(&base).await.unwrap().split();
+        let mut session = Session::start(send, receive, credentials(base), Connection::default());
+        let first = timeout(Duration::from_secs(2), session.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let frame: ServerFrame = serde_json::from_str(first.to_text().unwrap()).unwrap();
+        assert!(matches!(frame.event, ServerEvent::Error { .. }));
+        let ended = timeout(Duration::from_secs(2), session.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(!ended.retryable);
+        assert!(!session.recovering());
+        assert!(
+            server.await.unwrap(),
+            "a refused session must not be resumed"
+        );
+        session.close().await;
+    }
+
+    #[tokio::test]
     async fn persistent_outage_has_a_deadline_and_never_escalates_to_join() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

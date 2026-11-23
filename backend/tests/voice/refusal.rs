@@ -77,17 +77,19 @@ async fn excess_microphone_rate_is_refused_with_a_final_reason() {
         }
         _ => panic!("expected a refusal error"),
     }
-    // The refusal is final: the server closes instead of awaiting a resume.
-    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+    // The refusal is final: a policy close, which clients never resume.
+    let close = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match flooding.socket.next().await {
-                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                Some(Ok(Message::Close(frame))) => break frame.map(|f| u16::from(f.code)),
+                None | Some(Err(_)) => break None,
                 Some(Ok(_)) => {}
             }
         }
     })
-    .await;
-    assert!(closed.is_ok(), "refused connection must close");
+    .await
+    .expect("refused connection must close");
+    assert_eq!(close, Some(1008));
     still_connected(&mut listening.socket).await;
     flooding.close().await;
 
